@@ -1,9 +1,8 @@
 (function () {
   "use strict";
 
-  // Check if store.js loaded (the HTML error catcher will handle missing files, 
-  // but we need this guard so app.js doesn't crash immediately if it's missing).
   if (!window.Store) {
+    if (window.showError) window.showError("store.js did not load.");
     return; 
   }
 
@@ -45,7 +44,7 @@
         hideUndoBanner();
         refresh();
       }).catch(function (err) {
-        alert("Could not restore: " + err);
+        window.showError("Could not restore: " + err);
       });
     });
 
@@ -109,7 +108,7 @@
           }
           refresh();
         }).catch(function (err) {
-          alert("Could not delete: " + err);
+          window.showError("Could not delete: " + err);
           del.disabled = false;
           del.textContent = "Delete";
         });
@@ -123,7 +122,7 @@
 
   function refresh() {
     Store.list().then(render).catch(function (err) {
-      alert("Could not load canvases: " + err);
+      window.showError("Could not load canvases: " + err);
     });
   }
 
@@ -155,7 +154,7 @@
       closeNewDialog();
       refresh();
     }).catch(function (err) {
-      alert("Could not create canvas: " + err);
+      window.showError("Could not create canvas: " + err);
     });
   }
 
