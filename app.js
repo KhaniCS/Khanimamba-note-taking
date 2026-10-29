@@ -4,12 +4,14 @@
   function wireUp() {
     var btn = document.getElementById("new-canvas-btn");
     if (!btn) {
-      window.showError("Could not find the + button in the HTML.");
+      if (window.showError) window.showError("Could not find the + button in the HTML.");
       return;
     }
     
     btn.addEventListener("click", function () {
-      alert("THE BUTTON WAS TAPPED!");
+      if (window.showError) {
+        window.showError("THE BUTTON WAS TAPPED!");
+      }
     });
   }
 
