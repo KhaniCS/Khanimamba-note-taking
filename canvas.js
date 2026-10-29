@@ -19,8 +19,7 @@
   const MIN_SCALE = 0.000000001;
   const MAX_SCALE = 1000000000;
   
-  // HOW FAR YOU MUST ZOOM OUT BEFORE A STROKE DISAPPEARS
-  // 0.1 means it disappears when zoomed out to 10% of its original drawn size
+  // Disappears when zoomed out to 10% of its original drawn size
   const CULL_FACTOR = 0.1;
 
   const camera = { x: 0, y: 0, scale: 1, rotation: 0 };
@@ -129,7 +128,7 @@
   function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
     
-    // Absolute safety limit for physical pixels
+    // Multiply by camera.scale so it scales naturally once on the canvas
     const screenWidth = (stroke.width || 4) * camera.scale;
     if (screenWidth < 0.1) return;
 
@@ -187,7 +186,7 @@
         const s = canvasData.strokes[i];
         if (s.points.length > 0) {
           
-          // FACTOR CULLING: Does this stroke belong to a zoom level far bigger than right now?
+          // FACTOR CULLING
           const originScale = s.originScale || 1.0;
           if (camera.scale < originScale * CULL_FACTOR) continue;
 
@@ -273,9 +272,9 @@
         id: Store.uuid(),
         points: [{ x: w.x, y: w.y }],
         color: currentColor,
-        width: currentSize,
+        width: currentSize / camera.scale, // True to screen at moment of creation
         isEraser: currentTool === "eraser",
-        originScale: camera.scale // <--- Record the zoom level!
+        originScale: camera.scale
       };
       gesture = { type: "draw" };
     }
