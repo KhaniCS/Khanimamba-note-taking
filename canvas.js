@@ -33,6 +33,9 @@
   let rotationLocked = false;
   let rotationSnapHoldUntil = 0;
 
+  // --- THE ESCAPE HATCH ---
+  let optimizedMode = true;
+
   // --- SAVE TIMERS ---
   let saveTimer = null;
 
@@ -327,15 +330,18 @@
     }, 150); 
   }
 
-  // --- 1. PEN INPUT (ZERO MATH, NO COALESCED EVENTS) ---
+  // --- 1. PEN INPUT (CHECKS THE OPTIMIZATION FLAG) ---
   function penDown(e) {
-    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    // If optimized mode is OFF, accept any pointer type (finger, pen, mouse)
+    if (optimizedMode && e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
 
-    canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
-    canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
-    canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
-    canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
+    if (optimizedMode) {
+      canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
+      canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
+      canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
+      canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
+    }
 
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
@@ -376,7 +382,7 @@
   }
 
   function penMove(e) {
-    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (optimizedMode && e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     if (!currentStroke || !gesture || gesture.type !== "draw") return;
     if (!lastScreenPoint) return;
 
@@ -398,20 +404,21 @@
   }
 
   function penUp(e) {
-    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (optimizedMode && e.pointerType !== "pen" && e.pointerType !== "mouse") return;
 
     if (canvasEl.releasePointerCapture) {
       try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
     }
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
-    canvasEl.addEventListener("touchstart", touchStart, { passive: true });
-    canvasEl.addEventListener("touchmove", touchMove, { passive: false });
-    canvasEl.addEventListener("touchend", touchEnd, { passive: true });
-    canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
+    if (optimizedMode) {
+      canvasEl.addEventListener("touchstart", touchStart, { passive: true });
+      canvasEl.addEventListener("touchmove", touchMove, { passive: false });
+      canvasEl.addEventListener("touchend", touchEnd, { passive: true });
+      canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
+    }
 
     if (gesture && gesture.type === "draw" && currentStroke) {
-      // Ensure the final point from penUp is captured if it was missed by penMove
       const rect = canvasEl.getBoundingClientRect();
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
@@ -641,6 +648,25 @@
       rotationLocked = !rotationLocked;
       this.textContent = rotationLocked ? 'ROT 🔒' : 'ROT 🔓';
       this.classList.toggle('active', rotationLocked);
+    });
+
+    var optBtn = document.getElementById('optimize-btn');
+    optBtn.addEventListener('click', function() {
+      optimizedMode = !optimizedMode;
+      this.textContent = optimizedMode ? 'OPT ON' : 'OPT OFF';
+      this.style.background = optimizedMode ? '#ff9500' : '#555';
+      
+      if (optimizedMode) {
+        canvasEl.addEventListener("touchstart", touchStart, { passive: true });
+        canvasEl.addEventListener("touchmove", touchMove, { passive: false });
+        canvasEl.addEventListener("touchend", touchEnd, { passive: true });
+        canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
+      } else {
+        canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
+        canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
+        canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
+        canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
+      }
     });
   }
 
