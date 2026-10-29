@@ -32,9 +32,7 @@
   let currentColor = "#1a1a2e";
   let rotationLocked = false;
   let rotationSnapHoldUntil = 0;
-
-  // --- THE ESCAPE HATCH ---
-  let optimizedMode = true;
+  let zoomLocked = false;
 
   // --- SAVE TIMERS ---
   let saveTimer = null;
@@ -330,18 +328,15 @@
     }, 150); 
   }
 
-  // --- 1. PEN INPUT (CHECKS THE OPTIMIZATION FLAG) ---
+  // --- 1. PEN INPUT (ZERO MATH, NO COALESCED EVENTS) ---
   function penDown(e) {
-    // If optimized mode is OFF, accept any pointer type (finger, pen, mouse)
-    if (optimizedMode && e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
 
-    if (optimizedMode) {
-      canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
-      canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
-      canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
-      canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
-    }
+    canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
+    canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
+    canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
+    canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
 
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
@@ -382,7 +377,7 @@
   }
 
   function penMove(e) {
-    if (optimizedMode && e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     if (!currentStroke || !gesture || gesture.type !== "draw") return;
     if (!lastScreenPoint) return;
 
@@ -404,19 +399,17 @@
   }
 
   function penUp(e) {
-    if (optimizedMode && e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
 
     if (canvasEl.releasePointerCapture) {
       try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
     }
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
-    if (optimizedMode) {
-      canvasEl.addEventListener("touchstart", touchStart, { passive: true });
-      canvasEl.addEventListener("touchmove", touchMove, { passive: false });
-      canvasEl.addEventListener("touchend", touchEnd, { passive: true });
-      canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
-    }
+    canvasEl.addEventListener("touchstart", touchStart, { passive: true });
+    canvasEl.addEventListener("touchmove", touchMove, { passive: false });
+    canvasEl.addEventListener("touchend", touchEnd, { passive: true });
+    canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
 
     if (gesture && gesture.type === "draw" && currentStroke) {
       const rect = canvasEl.getBoundingClientRect();
@@ -547,7 +540,15 @@
       const midY = (t0.clientY - rect.top + t1.clientY - rect.top) / 2;
       const ratio = dist / gesture.startDist;
       
-      let newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, gesture.startScale * ratio));
+      let newScale = gesture.startScale * ratio;
+      
+      // ZOOM LOCK LOGIC
+      if (!zoomLocked) {
+        newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+      } else {
+        newScale = gesture.startScale;
+      }
+
       let newRotation = gesture.startRotation;
       
       if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
@@ -650,23 +651,11 @@
       this.classList.toggle('active', rotationLocked);
     });
 
-    var optBtn = document.getElementById('optimize-btn');
-    optBtn.addEventListener('click', function() {
-      optimizedMode = !optimizedMode;
-      this.textContent = optimizedMode ? 'OPT ON' : 'OPT OFF';
-      this.style.background = optimizedMode ? '#ff9500' : '#555';
-      
-      if (optimizedMode) {
-        canvasEl.addEventListener("touchstart", touchStart, { passive: true });
-        canvasEl.addEventListener("touchmove", touchMove, { passive: false });
-        canvasEl.addEventListener("touchend", touchEnd, { passive: true });
-        canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
-      } else {
-        canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
-        canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
-        canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
-        canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
-      }
+    var zoomLockBtn = document.getElementById('zoom-lock-btn');
+    zoomLockBtn.addEventListener('click', function() {
+      zoomLocked = !zoomLocked;
+      this.textContent = zoomLocked ? 'ZOOM 🔒' : 'ZOOM 🔓';
+      this.classList.toggle('active', zoomLocked);
     });
   }
 
