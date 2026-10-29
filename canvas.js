@@ -16,7 +16,8 @@
   let bgCtx = null;
   let bgDirty = true;
 
-  const camera = { x: 0, y: 0, scale: 1 };
+  // camera.rotation is in RADIANS (positive = clockwise on screen)
+  const camera = { x: 0, y: 0, scale: 1, rotation: 0 };
   const pointers = new Map();
   let gesture = null;
   let currentStroke = null;
@@ -28,19 +29,35 @@
   let currentTool = "pen";
   let currentSize = 4;
   let currentColor = "#1a1a2e";
+  let rotationLocked = false;
+  let rotationSnapHoldUntil = 0;
 
   function worldToScreen(wx, wy) {
+    const dx = wx - camera.x;
+    const dy = wy - camera.y;
+    const cos = Math.cos(camera.rotation);
+    const sin = Math.sin(camera.rotation);
     return {
-      x: (wx - camera.x) * camera.scale + canvasEl.clientWidth / 2,
-      y: (wy - camera.y) * camera.scale + canvasEl.clientHeight / 2
+      x: (dx * cos - dy * sin) * camera.scale + canvasEl.clientWidth / 2,
+      y: (dx * sin + dy * cos) * camera.scale + canvasEl.clientHeight / 2
     };
   }
 
   function screenToWorld(sx, sy) {
+    const px = sx - canvasEl.clientWidth / 2;
+    const py = sy - canvasEl.clientHeight / 2;
+    const cos = Math.cos(-camera.rotation);
+    const sin = Math.sin(-camera.rotation);
     return {
-      x: (sx - canvasEl.clientWidth / 2) / camera.scale + camera.x,
-      y: (sy - canvasEl.clientHeight / 2) / camera.scale + camera.y
+      x: (px * cos - py * sin) / camera.scale + camera.x,
+      y: (px * sin + py * cos) / camera.scale + camera.y
     };
+  }
+
+  function updateIndicators() {
+    document.getElementById("zoom-indicator").textContent = Math.round(camera.scale * 100) + "%";
+    const deg = Math.round(camera.rotation * 180 / Math.PI);
+    document.getElementById("rotation-indicator").textContent = deg + "°";
   }
 
   function invalidateBackground() { bgDirty = true; }
@@ -69,20 +86,25 @@
     const h = canvasEl.clientHeight;
     let spacing = 100;
     
-    // DYNAMIC GRID: Keep grid spacing reasonable on screen
+    // DYNAMIC GRID
     while (spacing * camera.scale < 30) spacing *= 2;
     while (spacing * camera.scale > 60) spacing /= 2;
 
     c.save();
     c.fillStyle = "#d0d0d8";
-    const tl = screenToWorld(0, 0);
-    const br = screenToWorld(w, h);
-    const startX = Math.floor(tl.x / spacing) * spacing;
-    const startY = Math.floor(tl.y / spacing) * spacing;
     
-    // Only render dots that are physically on screen
-    for (let wx = startX; wx <= br.x; wx += spacing) {
-      for (let wy = startY; wy <= br.y; wy += spacing) {
+    // Use a conservative bounding box to handle rotation
+    const halfDiag = Math.sqrt(w * w + h * h) / 2 / camera.scale;
+    const viewLeft = camera.x - halfDiag;
+    const viewRight = camera.x + halfDiag;
+    const viewTop = camera.y - halfDiag;
+    const viewBottom = camera.y + halfDiag;
+
+    const startX = Math.floor(viewLeft / spacing) * spacing;
+    const startY = Math.floor(viewTop / spacing) * spacing;
+    
+    for (let wx = startX; wx <= viewRight; wx += spacing) {
+      for (let wy = startY; wy <= viewBottom; wy += spacing) {
         const s = worldToScreen(wx, wy);
         c.beginPath();
         c.arc(s.x, s.y, 1.5, 0, Math.PI * 2);
@@ -95,15 +117,14 @@
   function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
     
-    // CULLING: If line width is less than 0.5 pixels, don't bother rendering
-    if ((stroke.width || 4) * camera.scale < 0.5) return;
-
     c.save();
     c.lineCap = "round";
     c.lineJoin = "round";
     c.strokeStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     c.fillStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
-    c.lineWidth = (stroke.width || 4) * camera.scale;
+    
+    // SCREEN-RELATIVE LINE WIDTH: no camera.scale multiplication
+    c.lineWidth = stroke.width || 4;
 
     if (stroke.points.length === 1) {
       const p = worldToScreen(stroke.points[0].x, stroke.points[0].y);
@@ -139,15 +160,17 @@
     drawGrid(bgCtx);
     
     if (canvasData) {
-      const viewLeft = camera.x - (canvasEl.clientWidth / 2) / camera.scale;
-      const viewRight = camera.x + (canvasEl.clientWidth / 2) / camera.scale;
-      const viewTop = camera.y - (canvasEl.clientHeight / 2) / camera.scale;
-      const viewBottom = camera.y + (canvasEl.clientHeight / 2) / camera.scale;
+      const w = canvasEl.clientWidth;
+      const h = canvasEl.clientHeight;
+      const halfDiag = Math.sqrt(w * w + h * h) / 2 / camera.scale;
+      const viewLeft = camera.x - halfDiag;
+      const viewRight = camera.x + halfDiag;
+      const viewTop = camera.y - halfDiag;
+      const viewBottom = camera.y + halfDiag;
 
       for (let i = 0; i < canvasData.strokes.length; i++) {
         const s = canvasData.strokes[i];
         if (s.points.length > 0) {
-          // BOUNDING BOX CULLING
           let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
           for (let j = 0; j < s.points.length; j++) {
             if (s.points[j].x < minX) minX = s.points[j].x;
@@ -156,8 +179,15 @@
             if (s.points[j].y > maxY) maxY = s.points[j].y;
           }
           
-          // If completely outside screen, skip rendering
+          // Off-screen culling
           if (maxX < viewLeft || minX > viewRight || maxY < viewTop || minY > viewBottom) continue;
+          
+          // Tiny stroke culling (10x smaller threshold)
+          if (s.points.length > 1) {
+            const screenW = (maxX - minX) * camera.scale;
+            const screenH = (maxY - minY) * camera.scale;
+            if (Math.max(screenW, screenH) < 0.05) continue;
+          }
         }
         drawStrokeOn(bgCtx, s, s.isEraser);
       }
@@ -203,11 +233,21 @@
         const dx = pts[1].x - pts[0].x;
         const dy = pts[1].y - pts[0].y;
         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const angle = Math.atan2(dy, dx);
+        const midX = (pts[0].x + pts[1].x) / 2;
+        const midY = (pts[0].y + pts[1].y) / 2;
+        
+        // Capture world coord under fingers AT gesture start
+        const startWorld = screenToWorld(midX, midY);
+        
         gesture = {
-          type: "zoom",
+          type: "pinch",
           startDist: dist,
-          startCam: { x: camera.x, y: camera.y, scale: camera.scale },
-          startMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 }
+          startAngle: angle,
+          startScale: camera.scale,
+          startRotation: camera.rotation,
+          startMid: { x: midX, y: midY },
+          startWorld: startWorld
         };
       }
       return;
@@ -253,31 +293,43 @@
       }
       redraw();
       
-    } else if (gesture && gesture.type === "zoom" && pointers.size >= 2) {
+    } else if (gesture && gesture.type === "pinch" && pointers.size >= 2) {
       const pts = Array.from(pointers.values());
       const dx = pts[1].x - pts[0].x;
       const dy = pts[1].y - pts[0].y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
-      const ratio = dist / gesture.startDist;
-      
-      // INFINITE ZOOM: Removed the 0.1 - 20 clamp
-      let newScale = gesture.startCam.scale * ratio;
-      
-      // Safety bound just to prevent NaN/Infinity calculation errors
-      newScale = Math.max(0.0001, Math.min(100000, newScale));
+      const currentAngle = Math.atan2(dy, dx);
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
 
       const vw = canvasEl.clientWidth;
       const vh = canvasEl.clientHeight;
-      const startWorld = {
-        x: (gesture.startMid.x - vw / 2) / gesture.startCam.scale + gesture.startCam.x,
-        y: (gesture.startMid.y - vh / 2) / gesture.startCam.scale + gesture.startCam.y
-      };
+
+      // ZOOM
+      const ratio = dist / gesture.startDist;
+      let newScale = gesture.startScale * ratio;
+      newScale = Math.max(0.0001, Math.min(100000, newScale));
+
+      // ROTATION
+      let newRotation = gesture.startRotation;
+      if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
+        newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
+      }
+
+      // Compute new camera so startWorld stays under mid
+      const mdx = midX - vw / 2;
+      const mdy = midY - vh / 2;
+      const cosNeg = Math.cos(-newRotation);
+      const sinNeg = Math.sin(-newRotation);
+      const rx = mdx * cosNeg - mdy * sinNeg;
+      const ry = mdx * sinNeg + mdy * cosNeg;
+
       camera.scale = newScale;
-      camera.x = startWorld.x - (mid.x - vw / 2) / newScale;
-      camera.y = startWorld.y - (mid.y - vh / 2) / newScale;
+      camera.rotation = newRotation;
+      camera.x = gesture.startWorld.x - rx / newScale;
+      camera.y = gesture.startWorld.y - ry / newScale;
       
-      document.getElementById("zoom-indicator").textContent = Math.round(newScale * 100) + "%";
+      updateIndicators();
       invalidateBackground();
       redraw();
     }
@@ -303,7 +355,14 @@
       }
       currentStroke = null;
       gesture = null;
-    } else if (gesture && gesture.type === "zoom" && pointers.size < 2) {
+    } else if (gesture && gesture.type === "pinch" && pointers.size < 2) {
+      // SNAP TO ZERO on gesture end if close to 0
+      if (!rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+        camera.rotation = 0;
+        rotationSnapHoldUntil = Date.now() + 1000;
+        updateIndicators();
+        invalidateBackground();
+      }
       gesture = null;
     }
     redraw();
@@ -346,17 +405,18 @@
     if (isFinite(minX) && isFinite(minY)) {
       camera.x = (minX + maxX) / 2;
       camera.y = (minY + maxY) / 2;
+      camera.rotation = 0; // Reset rotation on LOST
       
       const w = canvasEl.clientWidth;
       const h = canvasEl.clientHeight;
-      const contentW = maxX - minX + 200; // Add padding
+      const contentW = maxX - minX + 200;
       const contentH = maxY - minY + 200;
       
       let newScale = Math.min(w / contentW, h / contentH);
-      newScale = Math.max(0.0001, Math.min(100000, newScale)); // Prevent Infinity
-      
+      newScale = Math.max(0.0001, Math.min(100000, newScale));
       camera.scale = newScale;
-      document.getElementById("zoom-indicator").textContent = Math.round(newScale * 100) + "%";
+      
+      updateIndicators();
       invalidateBackground();
       redraw();
     }
@@ -388,6 +448,11 @@
     });
 
     document.getElementById('lost-btn').addEventListener('click', centerOnContent);
+    
+    document.getElementById('rotate-lock-btn').addEventListener('click', function() {
+      rotationLocked = !rotationLocked;
+      this.textContent = rotationLocked ? 'ROT 🔒' : 'ROT 🔓';
+    });
   }
 
   function setupEvents() {
@@ -421,6 +486,7 @@
       document.getElementById("canvas-title").textContent = data.title || "Untitled";
       setupEvents();
       centerOnContent();
+      updateIndicators();
       redraw();
     }).catch(function (err) {
       if (window.showError) window.showError("Could not load canvas: " + err);
