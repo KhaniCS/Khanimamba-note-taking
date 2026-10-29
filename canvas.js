@@ -24,6 +24,11 @@
   let saveInFlight = false;
   let isPenDrawing = false;
 
+  // Toolbar State
+  let currentTool = "pen";
+  let currentSize = 4;
+  let currentColor = "#1a1a2e";
+
   function worldToScreen(wx, wy) {
     return {
       x: (wx - camera.x) * camera.scale + canvasEl.clientWidth / 2,
@@ -62,14 +67,19 @@
   function drawGrid(c) {
     const w = canvasEl.clientWidth;
     const h = canvasEl.clientHeight;
-    const spacing = 100;
-    if (spacing * camera.scale < 12) return;
+    let spacing = 100;
+    
+    // DYNAMIC GRID: Adjust spacing based on zoom to prevent lag
+    while (spacing * camera.scale < 40) spacing *= 2;
+    while (spacing * camera.scale > 80) spacing /= 2;
+
     c.save();
     c.fillStyle = "#d0d0d8";
     const tl = screenToWorld(0, 0);
     const br = screenToWorld(w, h);
     const startX = Math.floor(tl.x / spacing) * spacing;
     const startY = Math.floor(tl.y / spacing) * spacing;
+    
     for (let wx = startX; wx <= br.x; wx += spacing) {
       for (let wy = startY; wy <= br.y; wy += spacing) {
         const s = worldToScreen(wx, wy);
@@ -81,14 +91,14 @@
     c.restore();
   }
 
-  function drawStrokeOn(c, stroke) {
+  function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
     c.save();
     c.lineCap = "round";
     c.lineJoin = "round";
-    c.strokeStyle = stroke.color || "#1a1a2e";
-    c.fillStyle = stroke.color || "#1a1a2e";
-    c.lineWidth = (stroke.width || 2) * camera.scale;
+    c.strokeStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
+    c.fillStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
+    c.lineWidth = (stroke.width || 4) * camera.scale;
 
     if (stroke.points.length === 1) {
       const p = worldToScreen(stroke.points[0].x, stroke.points[0].y);
@@ -108,10 +118,7 @@
         c.quadraticCurveTo(p1.x, p1.y, midX, midY);
       }
       
-      const lastP = worldToScreen(
-        stroke.points[stroke.points.length - 1].x, 
-        stroke.points[stroke.points.length - 1].y
-      );
+      const lastP = worldToScreen(stroke.points[stroke.points.length - 1].x, stroke.points[stroke.points.length - 1].y);
       c.lineTo(lastP.x, lastP.y);
       c.stroke();
     }
@@ -125,24 +132,52 @@
     bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     bgCtx.clearRect(0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
     drawGrid(bgCtx);
+    
     if (canvasData) {
+      const viewRect = camera.worldRect ? camera.worldRect(canvasEl.clientWidth / camera.scale, canvasEl.clientHeight / camera.scale) : null;
+      
+      // CULLING: Skip drawing strokes outside the view
+      const viewLeft = camera.x - (canvasEl.clientWidth / 2) / camera.scale;
+      const viewRight = camera.x + (canvasEl.clientWidth / 2) / camera.scale;
+      const viewTop = camera.y - (canvasEl.clientHeight / 2) / camera.scale;
+      const viewBottom = camera.y + (canvasEl.clientHeight / 2) / camera.scale;
+
       for (let i = 0; i < canvasData.strokes.length; i++) {
-        drawStrokeOn(bgCtx, canvasData.strokes[i]);
+        const s = canvasData.strokes[i];
+        if (s.points.length > 0) {
+          // Simple bounding box check for culling
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+          for (let j = 0; j < s.points.length; j++) {
+            if (s.points[j].x < minX) minX = s.points[j].x;
+            if (s.points[j].x > maxX) maxX = s.points[j].x;
+            if (s.points[j].y < minY) minY = s.points[j].y;
+            if (s.points[j].y > maxY) maxY = s.points[j].y;
+          }
+          // Add padding for line width
+          if (maxX < viewLeft || minX > viewRight || maxY < viewTop || minY > viewBottom) continue;
+        }
+        drawStrokeOn(bgCtx, s, s.isEraser);
       }
     }
     bgDirty = false;
   }
 
+  let renderScheduled = false;
   function redraw() {
-    if (!ctx) return;
-    renderBackground();
-    const w = canvasEl.clientWidth;
-    const h = canvasEl.clientHeight;
-    ctx.clearRect(0, 0, w, h);
-    ctx.drawImage(bgCanvas, 0, 0, w, h);
-    if (currentStroke) {
-      drawStrokeOn(ctx, currentStroke);
-    }
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(function() {
+      renderScheduled = false;
+      if (!ctx) return;
+      renderBackground();
+      const w = canvasEl.clientWidth;
+      const h = canvasEl.clientHeight;
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(bgCanvas, 0, 0, w, h);
+      if (currentStroke) {
+        drawStrokeOn(ctx, currentStroke, currentStroke.isEraser);
+      }
+    });
   }
 
   function pointerDown(e) {
@@ -150,60 +185,69 @@
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
     }
-    
+
+    // STRICT PALM REJECTION: Ignore touch if Pencil is drawing
     if (e.pointerType === "touch" && isPenDrawing) return;
-    if (e.pointerType === "pen") isPenDrawing = true;
 
     const rect = canvasEl.getBoundingClientRect();
-    // Rely ONLY on clientX/Y, never offsetX/Y for Pencil
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
-    pointers.set(e.pointerId, { x: localX, y: localY });
 
-    if (pointers.size === 1) {
-      const w = screenToWorld(localX, localY);
+    // TWO FINGER PAN/ZOOM (Fingers never draw)
+    if (e.pointerType === "touch") {
+      pointers.set(e.pointerId, { x: localX, y: localY });
+      if (pointers.size === 2) {
+        currentStroke = null; // Cancel accidental stroke
+        const pts = Array.from(pointers.values());
+        const dx = pts[1].x - pts[0].x;
+        const dy = pts[1].y - pts[0].y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        gesture = {
+          type: "zoom",
+          startDist: dist,
+          startCam: { x: camera.x, y: camera.y, scale: camera.scale },
+          startMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 }
+        };
+      }
+      return;
+    }
+
+    // ONE DRAWER LIMIT: Only Pen or Mouse
+    if ((e.pointerType === "pen" || e.pointerType === "mouse") && pointers.size === 0) {
+      if (e.pointerType === "pen") isPenDrawing = true;
+      pointers.set(e.pointerId, { x: localX, y: localY });
       
+      const w = screenToWorld(localX, localY);
       currentStroke = {
         id: Store.uuid(),
         points: [{ x: w.x, y: w.y }],
-        color: "#1a1a2e",
-        width: 2.5
+        color: currentColor,
+        width: currentSize,
+        isEraser: currentTool === "eraser"
       };
       gesture = { type: "draw" };
-    } else if (pointers.size === 2) {
-      currentStroke = null;
-      const pts = Array.from(pointers.values());
-      const dx = pts[1].x - pts[0].x;
-      const dy = pts[1].y - pts[0].y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      gesture = {
-        type: "zoom",
-        startDist: dist,
-        startCam: { x: camera.x, y: camera.y, scale: camera.scale },
-        startMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 }
-      };
     }
     redraw();
   }
 
   function pointerMove(e) {
+    if (e.pointerType === "touch" && isPenDrawing) return;
     if (!pointers.has(e.pointerId)) return;
-    e.preventDefault();
     
+    e.preventDefault();
     const rect = canvasEl.getBoundingClientRect();
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
     pointers.set(e.pointerId, { x: localX, y: localY });
 
     if (gesture && gesture.type === "draw" && currentStroke && pointers.size === 1) {
+      if (e.pointerType === "touch") return;
+
       const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-      
       for (let i = 0; i < events.length; i++) {
         const ev = events[i];
-        // Absolute math only. No offsetX.
         const evX = ev.clientX - rect.left;
         const evY = ev.clientY - rect.top;
-        
         const w = screenToWorld(evX, evY);
         currentStroke.points.push({ x: w.x, y: w.y });
       }
@@ -226,13 +270,17 @@
       camera.scale = newScale;
       camera.x = startWorld.x - (mid.x - vw / 2) / newScale;
       camera.y = startWorld.y - (mid.y - vh / 2) / newScale;
+      
+      document.getElementById("zoom-indicator").textContent = Math.round(newScale * 100) + "%";
       invalidateBackground();
       redraw();
     }
   }
 
   function pointerUp(e) {
+    if (e.pointerType === "touch" && isPenDrawing) return;
     if (!pointers.has(e.pointerId)) return;
+    
     e.preventDefault();
     pointers.delete(e.pointerId);
     if (canvasEl.releasePointerCapture) {
@@ -259,9 +307,7 @@
     if (!canvasData) return;
     canvasData.modifiedAt = Date.now();
     pendingSave = canvasData;
-    if (!saveInFlight) {
-      flushSave();
-    }
+    if (!saveInFlight) flushSave();
   }
 
   function flushSave() {
@@ -270,32 +316,12 @@
     pendingSave = null;
     saveInFlight = true;
     Store.save(snapshot).then(function () {
-      if (pendingSave) {
-        flushSave();
-      } else {
-        saveInFlight = false;
-      }
+      if (pendingSave) flushSave();
+      else saveInFlight = false;
     }).catch(function (err) {
       saveInFlight = false;
-      window.showError("Could not save: " + err);
+      if (window.showError) window.showError("Could not save: " + err);
     });
-  }
-
-  function undo() {
-    if (!canvasData || canvasData.strokes.length === 0) return;
-    canvasData.strokes.pop();
-    invalidateBackground();
-    requestSave();
-    redraw();
-  }
-
-  function clearAll() {
-    if (!canvasData || canvasData.strokes.length === 0) return;
-    if (!confirm("Clear all strokes on this canvas?")) return;
-    canvasData.strokes = [];
-    invalidateBackground();
-    requestSave();
-    redraw();
   }
 
   function centerOnContent() {
@@ -314,8 +340,45 @@
     if (isFinite(minX) && isFinite(minY)) {
       camera.x = (minX + maxX) / 2;
       camera.y = (minY + maxY) / 2;
+      // Zoom to fit
+      const w = canvasEl.clientWidth;
+      const h = canvasEl.clientHeight;
+      const contentW = maxX - minX + 100;
+      const contentH = maxY - minY + 100;
+      camera.scale = Math.min(w / contentW, h / contentH);
+      camera.scale = Math.max(0.1, Math.min(20, camera.scale));
+      document.getElementById("zoom-indicator").textContent = Math.round(camera.scale * 100) + "%";
       invalidateBackground();
+      redraw();
     }
+  }
+
+  function wireToolbar() {
+    document.querySelectorAll('.tool-btn[data-tool]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTool = btn.getAttribute('data-tool');
+      });
+    });
+
+    document.querySelectorAll('.size-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentSize = parseInt(btn.getAttribute('data-size'), 10);
+      });
+    });
+
+    document.querySelectorAll('.color-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentColor = btn.getAttribute('data-color');
+      });
+    });
+
+    document.getElementById('lost-btn').addEventListener('click', centerOnContent);
   }
 
   function setupEvents() {
@@ -326,15 +389,14 @@
 
     document.getElementById("back-btn").addEventListener("click", function () {
       if (saveInFlight || pendingSave) {
-        window.showError("Saving... please wait a moment.");
+        if (window.showError) window.showError("Saving... please wait.");
         setTimeout(function() { window.location.href = "index.html"; }, 500);
       } else {
         window.location.href = "index.html";
       }
     });
     
-    document.getElementById("undo-btn").addEventListener("click", undo);
-    document.getElementById("clear-btn").addEventListener("click", clearAll);
+    wireToolbar();
   }
 
   function init() {
@@ -342,23 +404,17 @@
 
     const params = new URLSearchParams(window.location.search);
     const id = params.get("id");
-    if (!id) {
-      window.location.href = "index.html";
-      return;
-    }
+    if (!id) { window.location.href = "index.html"; return; }
 
     Store.get(id).then(function (data) {
-      if (!data) {
-        window.location.href = "index.html";
-        return;
-      }
+      if (!data) { window.location.href = "index.html"; return; }
       canvasData = data;
       document.getElementById("canvas-title").textContent = data.title || "Untitled";
       setupEvents();
       centerOnContent();
       redraw();
     }).catch(function (err) {
-      window.showError("Could not load canvas: " + err);
+      if (window.showError) window.showError("Could not load canvas: " + err);
     });
   }
 
