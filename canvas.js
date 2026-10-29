@@ -16,7 +16,10 @@
   let bgCtx = null;
   let bgDirty = true;
 
-  // camera.rotation is in RADIANS (positive = clockwise on screen)
+  // PERFECTLY SYMMETRIC ZOOM LIMITS
+  const MIN_SCALE = 0.000000001;
+  const MAX_SCALE = 1000000000;
+
   const camera = { x: 0, y: 0, scale: 1, rotation: 0 };
   const pointers = new Map();
   let gesture = null;
@@ -25,7 +28,6 @@
   let saveInFlight = false;
   let isPenDrawing = false;
 
-  // Toolbar State
   let currentTool = "pen";
   let currentSize = 4;
   let currentColor = "#1a1a2e";
@@ -55,7 +57,18 @@
   }
 
   function updateIndicators() {
-    document.getElementById("zoom-indicator").textContent = Math.round(camera.scale * 100) + "%";
+    const scale = camera.scale;
+    let zoomText = "";
+    
+    // AHMNI STYLE ZOOM COUNTER
+    if (scale >= 0.01) {
+      zoomText = Math.round(scale * 100) + "%";
+    } else {
+      // Switch to scientific notation (e.g., 1.0e-3) for deep zoom
+      zoomText = scale.toExponential(1);
+    }
+    document.getElementById("zoom-indicator").textContent = zoomText;
+
     const deg = Math.round(camera.rotation * 180 / Math.PI);
     document.getElementById("rotation-indicator").textContent = deg + "°";
   }
@@ -86,14 +99,12 @@
     const h = canvasEl.clientHeight;
     let spacing = 100;
     
-    // DYNAMIC GRID
     while (spacing * camera.scale < 30) spacing *= 2;
     while (spacing * camera.scale > 60) spacing /= 2;
 
     c.save();
     c.fillStyle = "#d0d0d8";
     
-    // Use a conservative bounding box to handle rotation
     const halfDiag = Math.sqrt(w * w + h * h) / 2 / camera.scale;
     const viewLeft = camera.x - halfDiag;
     const viewRight = camera.x + halfDiag;
@@ -123,7 +134,6 @@
     c.strokeStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     c.fillStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     
-    // SCREEN-RELATIVE LINE WIDTH: no camera.scale multiplication
     c.lineWidth = stroke.width || 4;
 
     if (stroke.points.length === 1) {
@@ -179,10 +189,8 @@
             if (s.points[j].y > maxY) maxY = s.points[j].y;
           }
           
-          // Off-screen culling
           if (maxX < viewLeft || minX > viewRight || maxY < viewTop || minY > viewBottom) continue;
           
-          // Tiny stroke culling (10x smaller threshold)
           if (s.points.length > 1) {
             const screenW = (maxX - minX) * camera.scale;
             const screenH = (maxY - minY) * camera.scale;
@@ -237,7 +245,6 @@
         const midX = (pts[0].x + pts[1].x) / 2;
         const midY = (pts[0].y + pts[1].y) / 2;
         
-        // Capture world coord under fingers AT gesture start
         const startWorld = screenToWorld(midX, midY);
         
         gesture = {
@@ -305,18 +312,16 @@
       const vw = canvasEl.clientWidth;
       const vh = canvasEl.clientHeight;
 
-      // ZOOM
       const ratio = dist / gesture.startDist;
+      
       let newScale = gesture.startScale * ratio;
-      newScale = Math.max(0.0001, Math.min(100000, newScale));
+      newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
 
-      // ROTATION
       let newRotation = gesture.startRotation;
       if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
         newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
       }
 
-      // Compute new camera so startWorld stays under mid
       const mdx = midX - vw / 2;
       const mdy = midY - vh / 2;
       const cosNeg = Math.cos(-newRotation);
@@ -356,7 +361,6 @@
       currentStroke = null;
       gesture = null;
     } else if (gesture && gesture.type === "pinch" && pointers.size < 2) {
-      // SNAP TO ZERO on gesture end if close to 0
       if (!rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
         camera.rotation = 0;
         rotationSnapHoldUntil = Date.now() + 1000;
@@ -405,7 +409,7 @@
     if (isFinite(minX) && isFinite(minY)) {
       camera.x = (minX + maxX) / 2;
       camera.y = (minY + maxY) / 2;
-      camera.rotation = 0; // Reset rotation on LOST
+      camera.rotation = 0;
       
       const w = canvasEl.clientWidth;
       const h = canvasEl.clientHeight;
@@ -413,7 +417,7 @@
       const contentH = maxY - minY + 200;
       
       let newScale = Math.min(w / contentW, h / contentH);
-      newScale = Math.max(0.0001, Math.min(100000, newScale));
+      newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
       camera.scale = newScale;
       
       updateIndicators();
