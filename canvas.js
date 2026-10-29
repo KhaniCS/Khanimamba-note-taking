@@ -11,6 +11,7 @@
   let canvasData = null;
   let ctx = null;
   let canvasEl = null;
+  let toolbarEl = null;
   let dpr = window.devicePixelRatio || 1;
   let bgCanvas = null;
   let bgCtx = null;
@@ -168,6 +169,7 @@
 
   function setupCanvas() {
     canvasEl = document.getElementById("draw-surface");
+    toolbarEl = document.getElementById("toolbar");
     ctx = canvasEl.getContext("2d");
     bgCanvas = document.createElement("canvas");
     bgCtx = bgCanvas.getContext("2d");
@@ -330,21 +332,19 @@
 
   // --- INPUT ---
   function pointerDown(e) {
-    if (e.pointerType !== "touch") {
+    // 1. PEN TAKES ABSOLUTE PRIORITY
+    if (e.pointerType === "pen" || e.pointerType === "mouse") {
       e.preventDefault();
       if (canvasEl.setPointerCapture) {
         try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
       }
-    }
+      if (toolbarEl) toolbarEl.style.pointerEvents = "none";
 
-    const rect = canvasEl.getBoundingClientRect();
-    const localX = e.clientX - rect.left;
-    const localY = e.clientY - rect.top;
-
-    // 1. PEN TAKES ABSOLUTE PRIORITY
-    if (e.pointerType === "pen" || e.pointerType === "mouse") {
-      pointers.clear(); 
+      const rect = canvasEl.getBoundingClientRect();
+      const localX = e.clientX - rect.left;
+      const localY = e.clientY - rect.top;
       const w = screenToWorld(localX, localY);
+      
       currentStroke = {
         id: Store.uuid(), points: [{ x: w.x, y: w.y }],
         color: currentColor, width: currentSize / camera.scale,
@@ -357,12 +357,16 @@
 
     // 2. TOUCHES (PAN & ZOOM)
     if (e.pointerType === "touch") {
+      const rect = canvasEl.getBoundingClientRect();
+      const localX = e.clientX - rect.left;
+      const localY = e.clientY - rect.top;
+
       pointers.set(e.pointerId, { x: localX, y: localY });
       
       if (pointers.size === 1) {
-        gesture = { type: "pan", lastX: localX, lastY: localY };
+        // Start a "pending" pan. We wait for movement before actually panning.
+        gesture = { type: "pending_pan", startX: localX, startY: localY };
       } else if (pointers.size === 2) {
-        currentStroke = null;
         const pts = Array.from(pointers.values());
         const dx = pts[1].x - pts[0].x;
         const dy = pts[1].y - pts[0].y;
@@ -385,7 +389,7 @@
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
 
-    // 1. PEN / MOUSE DRAWING
+    // 1. PEN DRAWING
     if (e.pointerType === "pen" || e.pointerType === "mouse") {
       if (gesture && gesture.type === "draw" && currentStroke) {
         const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
@@ -406,26 +410,31 @@
       return; 
     }
 
-    // 2. TOUCHES (PAN & ZOOM)
+    // 2. TOUCHES
     if (e.pointerType === "touch") {
       if (!pointers.has(e.pointerId)) return;
       pointers.set(e.pointerId, { x: localX, y: localY });
 
-      if (gesture && gesture.type === "pan" && pointers.size === 1) {
+      // PENDING PAN: Wait for the finger to move at least 15 pixels
+      if (gesture && gesture.type === "pending_pan") {
+        const dx = localX - gesture.startX;
+        const dy = localY - gesture.startY;
+        const distSq = (dx * dx) + (dy * dy);
+        
+        if (distSq > 225) { // 15 pixels squared
+          gesture = { type: "pan", lastX: localX, lastY: localY };
+        }
+      } 
+      // ACTIVE PAN: Move the camera
+      else if (gesture && gesture.type === "pan" && pointers.size === 1) {
         const dx = localX - gesture.lastX;
         const dy = localY - gesture.lastY;
-        
         const cos = Math.cos(-camera.rotation);
         const sin = Math.sin(-camera.rotation);
-        const worldDX = (dx * cos - dy * sin) / camera.scale;
-        const worldDY = (dx * sin + dy * cos) / camera.scale;
-        
-        camera.x -= worldDX;
-        camera.y -= worldDY;
-        
+        camera.x -= (dx * cos - dy * sin) / camera.scale;
+        camera.y -= (dx * sin + dy * cos) / camera.scale;
         gesture.lastX = localX;
         gesture.lastY = localY;
-        
         invalidateBackground();
         redraw();
 
@@ -437,29 +446,24 @@
         const currentAngle = Math.atan2(dy, dx);
         const midX = (pts[0].x + pts[1].x) / 2;
         const midY = (pts[0].y + pts[1].y) / 2;
-        const vw = canvasEl.clientWidth;
-        const vh = canvasEl.clientHeight;
         const ratio = dist / gesture.startDist;
         
-        let newScale = gesture.startScale * ratio;
-        newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+        let newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, gesture.startScale * ratio));
         let newRotation = gesture.startRotation;
         
         if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
           newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
         }
         
-        const mdx = midX - vw / 2;
-        const mdy = midY - vh / 2;
+        const mdx = midX - canvasEl.clientWidth / 2;
+        const mdy = midY - canvasEl.clientHeight / 2;
         const cosNeg = Math.cos(-newRotation);
         const sinNeg = Math.sin(-newRotation);
-        const rx = mdx * cosNeg - mdy * sinNeg;
-        const ry = mdx * sinNeg + mdy * cosNeg;
         
         camera.scale = newScale;
         camera.rotation = newRotation;
-        camera.x = gesture.startWorld.x - rx / newScale;
-        camera.y = gesture.startWorld.y - ry / newScale;
+        camera.x = gesture.startWorld.x - (mdx * cosNeg - mdy * sinNeg) / newScale;
+        camera.y = gesture.startWorld.y - (mdx * sinNeg + mdy * cosNeg) / newScale;
         
         updateIndicators();
         invalidateBackground();
@@ -469,8 +473,9 @@
   }
 
   function pointerUp(e) {
-    // 1. PEN / MOUSE LIFT
+    // 1. PEN LIFT
     if (e.pointerType === "pen" || e.pointerType === "mouse") {
+      if (toolbarEl) toolbarEl.style.pointerEvents = "auto"; 
       if (canvasEl.releasePointerCapture) {
         try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
       }
@@ -511,10 +516,11 @@
         }
         gesture = null;
         redraw();
-        
-      } else if (pointers.size === 1 && gesture && gesture.type === "pinch") {
+      } else if (pointers.size === 1 && (gesture && (gesture.type === "pinch" || gesture.type === "pan"))) {
+        // Seamless transition back to pending_pan for the remaining finger
         const remaining = Array.from(pointers.values())[0];
-        gesture = { type: "pan", lastX: remaining.x, lastY: remaining.y };
+        gesture = { type: "pending_pan", startX: remaining.x, startY: remaining.y };
+        redraw();
       }
     }
   }
