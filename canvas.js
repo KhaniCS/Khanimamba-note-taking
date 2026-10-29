@@ -36,9 +36,6 @@
 
   // --- SAVE TIMERS ---
   let saveTimer = null;
-  let overlayTimer = null;
-  let hideTimer = null;
-  let isSavingBlock = false;
 
   // --- QUADTREE ---
   class QuadTree {
@@ -291,68 +288,54 @@
     });
   }
 
-  // --- THE SEQUENTIAL SAVING MAGIC ---
-  function showSavingPopup() {
-    isSavingBlock = true;
-    const overlay = document.getElementById("saving-overlay");
-    if (overlay) overlay.classList.add("visible");
-  }
-
-  function hideSavingPopup() {
-    isSavingBlock = false;
-    const overlay = document.getElementById("saving-overlay");
-    if (overlay) overlay.classList.remove("visible");
-  }
-
+  // --- DEBOUNCED SAVING MAGIC ---
   function requestSave() {
     if (!canvasData) return;
     canvasData.modifiedAt = Date.now();
     pendingSave = canvasData;
 
-    // Reset all timers on new stroke
     if (saveTimer) clearTimeout(saveTimer);
-    if (overlayTimer) clearTimeout(overlayTimer);
-    if (hideTimer) clearTimeout(hideTimer);
-    if (isSavingBlock) hideSavingPopup();
 
-    // 4 seconds: Show Popup, block presses
-    overlayTimer = setTimeout(function() {
-      showSavingPopup();
-      
-      // Hide popup 2 seconds later
-      hideTimer = setTimeout(function() {
-        hideSavingPopup();
-      }, 2000);
-
-    }, 4000);
-
-    // 5 seconds: Actually save the data in the background
     saveTimer = setTimeout(function() {
-      if (!saveInFlight) flushSave();
+      executeSave();
     }, 5000);
   }
 
-  function flushSave() {
-    if (!pendingSave) { saveInFlight = false; return; }
+  function executeSave() {
+    if (!pendingSave || saveInFlight) return;
+    
+    saveInFlight = true;
+    const overlay = document.getElementById("saving-overlay");
+    
+    // 1. Start the animation immediately
+    if (overlay) overlay.classList.add("visible");
+    
     const snapshot = pendingSave;
     pendingSave = null;
-    saveInFlight = true;
     
-    Store.save(snapshot).then(function () {
-      if (pendingSave) {
-        flushSave();
-      } else {
+    // 2. Wait 150ms before starting the actual database save
+    setTimeout(function() {
+      
+      Store.save(snapshot).then(function () {
+        // 3. They end at the same time: hide the overlay exactly when the save finishes
         saveInFlight = false;
-      }
-    }).catch(function (err) {
-      saveInFlight = false;
-      if (window.showError) window.showError("Could not save: " + err);
-    });
+        if (overlay) overlay.classList.remove("visible");
+        
+        if (pendingSave) {
+          if (saveTimer) clearTimeout(saveTimer);
+          saveTimer = setTimeout(executeSave, 5000);
+        }
+      }).catch(function (err) {
+        saveInFlight = false;
+        if (overlay) overlay.classList.remove("visible");
+        if (window.showError) window.showError("Could not save: " + err);
+      });
+      
+    }, 150); // 150ms delay
   }
 
   // --- INPUT ---
   function pointerDown(e) {
-    if (isSavingBlock) return; // Block touches when saving
     e.preventDefault();
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
@@ -399,7 +382,6 @@
   }
 
   function pointerMove(e) {
-    if (isSavingBlock) return;
     if (e.pointerType === "touch" && isPenDrawing) return;
     if (!pointers.has(e.pointerId)) return;
     
@@ -461,7 +443,6 @@
   }
 
   function pointerUp(e) {
-    if (isSavingBlock) return;
     if (e.pointerType === "touch" && isPenDrawing) return;
     if (!pointers.has(e.pointerId)) return;
     e.preventDefault();
@@ -488,7 +469,6 @@
         
         drawStrokeOn(bgCtx, currentStroke, currentStroke.isEraser);
         
-        // Trigger the 5-second delay save
         requestSave(); 
       }
       currentStroke = null;
