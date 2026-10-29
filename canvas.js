@@ -1,6 +1,11 @@
 (function () {
   "use strict";
 
+  if (!window.Store) {
+    if (window.showError) window.showError("store.js did not load.");
+    return;
+  }
+
   const Store = window.Store;
 
   let canvasData = null;
@@ -17,6 +22,7 @@
   let currentStroke = null;
   let pendingSave = null;
   let saveInFlight = false;
+  let isPenDrawing = false;
 
   function worldToScreen(wx, wy) {
     return {
@@ -131,8 +137,13 @@
   function pointerDown(e) {
     e.preventDefault();
     if (canvasEl.setPointerCapture) {
-      try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
     }
+    
+    // Bug Fix A: Ignore touch (palm/finger) if pen is drawing
+    if (e.pointerType === "touch" && isPenDrawing) return;
+    if (e.pointerType === "pen") isPenDrawing = true;
+
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (pointers.size === 1) {
@@ -196,8 +207,10 @@
     e.preventDefault();
     pointers.delete(e.pointerId);
     if (canvasEl.releasePointerCapture) {
-      try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
     }
+
+    if (e.pointerType === "pen") isPenDrawing = false;
 
     if (gesture && gesture.type === "draw" && currentStroke) {
       if (currentStroke.points.length > 0 && canvasData) {
@@ -235,7 +248,7 @@
       }
     }).catch(function (err) {
       saveInFlight = false;
-      alert("Could not save: " + err);
+      window.showError("Could not save: " + err);
     });
   }
 
@@ -282,9 +295,16 @@
     canvasEl.addEventListener("pointerup", pointerUp);
     canvasEl.addEventListener("pointercancel", pointerUp);
 
+    // Bug Fix B: Wait for saves before going back
     document.getElementById("back-btn").addEventListener("click", function () {
-      window.location.href = "index.html";
+      if (saveInFlight || pendingSave) {
+        window.showError("Saving... please wait a moment.");
+        setTimeout(function() { window.location.href = "index.html"; }, 500);
+      } else {
+        window.location.href = "index.html";
+      }
     });
+    
     document.getElementById("undo-btn").addEventListener("click", undo);
     document.getElementById("clear-btn").addEventListener("click", clearAll);
   }
@@ -295,14 +315,12 @@
     const params = new URLSearchParams(window.location.search);
     const id = params.get("id");
     if (!id) {
-      alert("No canvas specified");
       window.location.href = "index.html";
       return;
     }
 
     Store.get(id).then(function (data) {
       if (!data) {
-        alert("Canvas not found");
         window.location.href = "index.html";
         return;
       }
@@ -312,8 +330,7 @@
       centerOnContent();
       redraw();
     }).catch(function (err) {
-      alert("Could not load canvas: " + err);
-      window.location.href = "index.html";
+      window.showError("Could not load canvas: " + err);
     });
   }
 
