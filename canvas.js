@@ -37,7 +37,6 @@
   let saveTimer = null;
 
   // --- PEN STATE ---
-  let prevMidScreen = null;
   let lastScreenPoint = null;
   let screenPoints = [];
   let strokeOriginCamera = null;
@@ -293,7 +292,7 @@
     });
   }
 
-  // --- SAVING MAGIC ---
+  // --- SAVING ---
   function requestSave() {
     if (!canvasData) return;
     canvasData.modifiedAt = Date.now();
@@ -328,15 +327,7 @@
     }, 150); 
   }
 
-  // --- 1. PEN INPUT (ZERO MATH WHILE DRAWING) ---
-  function setupStrokeCtx(c, stroke) {
-    c.lineCap = "round";
-    c.lineJoin = "round";
-    c.strokeStyle = stroke.isEraser ? "#fbfaf7" : stroke.color;
-    c.fillStyle = stroke.isEraser ? "#fbfaf7" : stroke.color;
-    c.lineWidth = stroke.width * camera.scale;
-  }
-
+  // --- 1. PEN INPUT (ZERO MATH, NO COALESCED EVENTS) ---
   function penDown(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
@@ -371,15 +362,17 @@
     gesture = { type: "draw" };
 
     lastScreenPoint = { x: sx, y: sy };
-    prevMidScreen = { x: sx, y: sy };
     screenPoints = [{ x: sx, y: sy }];
 
-    ctx.save();
-    setupStrokeCtx(ctx, currentStroke);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = currentStroke.isEraser ? "#fbfaf7" : currentStroke.color;
+    ctx.fillStyle = currentStroke.isEraser ? "#fbfaf7" : currentStroke.color;
+    ctx.lineWidth = currentStroke.width * camera.scale;
+
     ctx.beginPath();
     ctx.arc(sx, sy, ctx.lineWidth / 2, 0, Math.PI * 2);
     ctx.fill();
-    ctx.restore();
   }
 
   function penMove(e) {
@@ -388,33 +381,20 @@
     if (!lastScreenPoint) return;
 
     const rect = canvasEl.getBoundingClientRect();
-    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
 
-    ctx.save();
-    setupStrokeCtx(ctx, currentStroke);
+    const dx = sx - lastScreenPoint.x;
+    const dy = sy - lastScreenPoint.y;
+    if ((dx * dx) + (dy * dy) < 2.25) return;
 
-    for (let i = 0; i < events.length; i++) {
-      const ev = events[i];
-      const sx = ev.clientX - rect.left;
-      const sy = ev.clientY - rect.top;
+    ctx.beginPath();
+    ctx.moveTo(lastScreenPoint.x, lastScreenPoint.y);
+    ctx.lineTo(sx, sy);
+    ctx.stroke();
 
-      const dx = sx - lastScreenPoint.x;
-      const dy = sy - lastScreenPoint.y;
-      if ((dx * dx) + (dy * dy) < 2.25) continue;
-
-      const newMidScreen = { x: (lastScreenPoint.x + sx) / 2, y: (lastScreenPoint.y + sy) / 2 };
-
-      ctx.beginPath();
-      ctx.moveTo(prevMidScreen.x, prevMidScreen.y);
-      ctx.quadraticCurveTo(lastScreenPoint.x, lastScreenPoint.y, newMidScreen.x, newMidScreen.y);
-      ctx.stroke();
-
-      screenPoints.push({ x: sx, y: sy });
-
-      prevMidScreen = newMidScreen;
-      lastScreenPoint = { x: sx, y: sy };
-    }
-    ctx.restore();
+    screenPoints.push({ x: sx, y: sy });
+    lastScreenPoint = { x: sx, y: sy };
   }
 
   function penUp(e) {
@@ -431,14 +411,17 @@
     canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
 
     if (gesture && gesture.type === "draw" && currentStroke) {
-      if (lastScreenPoint) {
-        ctx.save();
-        setupStrokeCtx(ctx, currentStroke);
+      // Ensure the final point from penUp is captured if it was missed by penMove
+      const rect = canvasEl.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      
+      if (lastScreenPoint && (lastScreenPoint.x !== sx || lastScreenPoint.y !== sy)) {
         ctx.beginPath();
-        ctx.moveTo(prevMidScreen.x, prevMidScreen.y);
-        ctx.lineTo(lastScreenPoint.x, lastScreenPoint.y);
+        ctx.moveTo(lastScreenPoint.x, lastScreenPoint.y);
+        ctx.lineTo(sx, sy);
         ctx.stroke();
-        ctx.restore();
+        screenPoints.push({ x: sx, y: sy });
       }
 
       if (strokeOriginCamera && screenPoints.length > 0) {
@@ -476,7 +459,6 @@
       currentStroke = null;
       gesture = null;
       lastScreenPoint = null;
-      prevMidScreen = null;
       screenPoints = [];
       strokeOriginCamera = null;
     }
@@ -663,7 +645,6 @@
   }
 
   function setupEvents() {
-    // THE FIX: Kill the Apple Pencil long-press context menu entirely
     canvasEl.addEventListener("contextmenu", function(ev) { ev.preventDefault(); });
     canvasEl.addEventListener("selectstart", function(ev) { ev.preventDefault(); });
     document.addEventListener("contextmenu", function(ev) { ev.preventDefault(); });
