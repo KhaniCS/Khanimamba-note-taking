@@ -29,37 +29,43 @@ html, body {
   position: absolute; top: 0; left: 0;
 }
 
-/* HTML NODES LAYER */
-#nodes-layer {
+/* LIQUID GLASS SAVING POPUP */
+#saving-overlay {
   position: absolute;
-  top: 0; left: 0;
-  width: 100%; height: 100%;
-  pointer-events: none; 
-  transform-origin: 0 0;
-  overflow: visible;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: none;
+  z-index: 999;
+  opacity: 0;
+  transition: opacity 0.3s ease;
 }
-.mind-node {
-  position: absolute;
-  background: #fff;
-  padding: 12px;
-  border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  border: 2px solid #e5e5e7;
-  min-width: 120px;
-  min-height: 40px;
-  pointer-events: auto; 
-  font-size: 16px;
+#saving-overlay.visible {
+  pointer-events: auto; /* Prevents presses */
+  opacity: 1;
+}
+.glass-card {
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  padding: 16px 24px;
+  border-radius: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  font-size: 15px;
+  font-weight: 600;
   color: #1d1d1f;
-  outline: none;
-  user-select: text;
-  -webkit-user-select: text;
-  cursor: grab;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
-.mind-node:focus {
-  border-color: #007aff;
-  box-shadow: 0 4px 16px rgba(0,122,255,0.3);
-  cursor: text;
+.spinner {
+  width: 16px; height: 16px;
+  border: 2px solid rgba(0,0,0,0.2);
+  border-top-color: #1d1d1f;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 #bottom-indicators {
   position: absolute; bottom: 20px; right: 20px;
