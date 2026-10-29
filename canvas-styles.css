@@ -46,6 +46,7 @@ html, body {
   position: absolute; top: 0; left: 0;
 }
 
+/* LIQUID GLASS SAVING POPUP */
 #saving-overlay {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
