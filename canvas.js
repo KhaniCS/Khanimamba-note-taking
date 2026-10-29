@@ -89,6 +89,7 @@
     c.strokeStyle = stroke.color || "#1a1a2e";
     c.fillStyle = stroke.color || "#1a1a2e";
     c.lineWidth = (stroke.width || 2) * camera.scale;
+
     if (stroke.points.length === 1) {
       const p = worldToScreen(stroke.points[0].x, stroke.points[0].y);
       c.beginPath();
@@ -98,10 +99,21 @@
       c.beginPath();
       const p0 = worldToScreen(stroke.points[0].x, stroke.points[0].y);
       c.moveTo(p0.x, p0.y);
-      for (let i = 1; i < stroke.points.length; i++) {
-        const p = worldToScreen(stroke.points[i].x, stroke.points[i].y);
-        c.lineTo(p.x, p.y);
+
+      // Smooth curve drawing
+      for (let i = 1; i < stroke.points.length - 1; i++) {
+        const p1 = worldToScreen(stroke.points[i].x, stroke.points[i].y);
+        const p2 = worldToScreen(stroke.points[i + 1].x, stroke.points[i + 1].y);
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+        c.quadraticCurveTo(p1.x, p1.y, midX, midY);
       }
+      
+      const lastP = worldToScreen(
+        stroke.points[stroke.points.length - 1].x, 
+        stroke.points[stroke.points.length - 1].y
+      );
+      c.lineTo(lastP.x, lastP.y);
       c.stroke();
     }
     c.restore();
@@ -140,14 +152,18 @@
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
     }
     
-    // Bug Fix A: Ignore touch (palm/finger) if pen is drawing
     if (e.pointerType === "touch" && isPenDrawing) return;
     if (e.pointerType === "pen") isPenDrawing = true;
 
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    // Store local canvas coordinates for perfect zoom tracking
+    const rect = canvasEl.getBoundingClientRect();
+    const localX = e.clientX - rect.left;
+    const localY = e.clientY - rect.top;
+    pointers.set(e.pointerId, { x: localX, y: localY });
 
     if (pointers.size === 1) {
-      const w = screenToWorld(e.clientX, e.clientY);
+      const w = screenToWorld(localX, localY);
+      
       currentStroke = {
         id: Store.uuid(),
         points: [{ x: w.x, y: w.y }],
@@ -174,12 +190,27 @@
   function pointerMove(e) {
     if (!pointers.has(e.pointerId)) return;
     e.preventDefault();
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    
+    const rect = canvasEl.getBoundingClientRect();
+    const localX = e.clientX - rect.left;
+    const localY = e.clientY - rect.top;
+    pointers.set(e.pointerId, { x: localX, y: localY });
 
     if (gesture && gesture.type === "draw" && currentStroke && pointers.size === 1) {
-      const w = screenToWorld(e.clientX, e.clientY);
-      currentStroke.points.push({ x: w.x, y: w.y });
+      // Capture all high-speed Apple Pencil data
+      const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+      
+      for (let i = 0; i < events.length; i++) {
+        const ev = events[i];
+        // Use offsetX/Y to guarantee we ignore the header offset entirely
+        const evX = ev.offsetX !== undefined ? ev.offsetX : (ev.clientX - rect.left);
+        const evY = ev.offsetY !== undefined ? ev.offsetY : (ev.clientY - rect.top);
+        
+        const w = screenToWorld(evX, evY);
+        currentStroke.points.push({ x: w.x, y: w.y });
+      }
       redraw();
+      
     } else if (gesture && gesture.type === "zoom" && pointers.size >= 2) {
       const pts = Array.from(pointers.values());
       const dx = pts[1].x - pts[0].x;
@@ -295,7 +326,6 @@
     canvasEl.addEventListener("pointerup", pointerUp);
     canvasEl.addEventListener("pointercancel", pointerUp);
 
-    // Bug Fix B: Wait for saves before going back
     document.getElementById("back-btn").addEventListener("click", function () {
       if (saveInFlight || pendingSave) {
         window.showError("Saving... please wait a moment.");
