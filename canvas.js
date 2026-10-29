@@ -100,7 +100,6 @@
       const p0 = worldToScreen(stroke.points[0].x, stroke.points[0].y);
       c.moveTo(p0.x, p0.y);
 
-      // Smooth curve drawing
       for (let i = 1; i < stroke.points.length - 1; i++) {
         const p1 = worldToScreen(stroke.points[i].x, stroke.points[i].y);
         const p2 = worldToScreen(stroke.points[i + 1].x, stroke.points[i + 1].y);
@@ -155,8 +154,8 @@
     if (e.pointerType === "touch" && isPenDrawing) return;
     if (e.pointerType === "pen") isPenDrawing = true;
 
-    // Store local canvas coordinates for perfect zoom tracking
     const rect = canvasEl.getBoundingClientRect();
+    // Rely ONLY on clientX/Y, never offsetX/Y for Pencil
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
     pointers.set(e.pointerId, { x: localX, y: localY });
@@ -197,14 +196,13 @@
     pointers.set(e.pointerId, { x: localX, y: localY });
 
     if (gesture && gesture.type === "draw" && currentStroke && pointers.size === 1) {
-      // Capture all high-speed Apple Pencil data
       const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
       
       for (let i = 0; i < events.length; i++) {
         const ev = events[i];
-        // Use offsetX/Y to guarantee we ignore the header offset entirely
-        const evX = ev.offsetX !== undefined ? ev.offsetX : (ev.clientX - rect.left);
-        const evY = ev.offsetY !== undefined ? ev.offsetY : (ev.clientY - rect.top);
+        // Absolute math only. No offsetX.
+        const evX = ev.clientX - rect.left;
+        const evY = ev.clientY - rect.top;
         
         const w = screenToWorld(evX, evY);
         currentStroke.points.push({ x: w.x, y: w.y });
