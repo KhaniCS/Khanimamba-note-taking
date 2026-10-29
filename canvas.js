@@ -328,7 +328,7 @@
     }, 150); 
   }
 
-  // --- 1. PEN INPUT (ZERO MATH, NO COALESCED EVENTS) ---
+  // --- 1. PEN INPUT ---
   function penDown(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
@@ -464,7 +464,7 @@
     }
   }
 
-  // --- 2. TOUCH INPUT (PAN & ZOOM) ---
+  // --- 2. TOUCH INPUT ---
   function touchStart(e) {
     if (gesture && gesture.type === "draw") return;
 
@@ -588,7 +588,8 @@
       redraw();
     } else if (e.touches.length === 1 && gesture.type === "pinch") {
       const t = e.touches[0];
-      gesture = { type: "pending_pan", startX: t.clientX - rect.left, startY: t.clientY - rect.top };
+      const r = canvasEl.getBoundingClientRect();
+      gesture = { type: "pending_pan", startX: t.clientX - r.left, startY: t.clientY - r.top };
     }
   }
 
