@@ -8,7 +8,6 @@
   <title>Inkloom Canvas</title>
   <link rel="stylesheet" href="canvas-styles.css">
   
-  <!-- GLOBAL ERROR CATCHER (Same as index.html) -->
   <script>
     function showError(msg) {
       var d = document.createElement("div");
@@ -17,7 +16,6 @@
       document.body.appendChild(d);
     }
     window.showError = showError;
-    
     window.addEventListener('error', function(e) {
       if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
         showError("Failed to load file: " + (e.target.src || e.target.href));
@@ -25,7 +23,6 @@
         showError(e.message + " in " + (e.filename || "unknown file"));
       }
     }, true);
-
     window.addEventListener('unhandledrejection', function(e) {
       showError("Database/Async error: " + e.reason);
     });
@@ -35,14 +32,42 @@
   <header id="canvas-header">
     <button id="back-btn" type="button">‹ Library</button>
     <h1 id="canvas-title">Canvas</h1>
-    <div id="canvas-actions">
-      <button id="undo-btn" type="button">Undo</button>
-      <button id="clear-btn" type="button" class="danger">Clear</button>
-    </div>
+    <div id="zoom-indicator">100%</div>
   </header>
+
+  <!-- AHMNI STYLE TOOLBAR -->
+  <div id="toolbar">
+    <button id="lost-btn" class="tool-btn wide" type="button">LOST</button>
+    <div class="divider"></div>
+    
+    <div class="tool-group">
+      <button class="tool-btn active" data-tool="pen" type="button">✎</button>
+      <button class="tool-btn" data-tool="eraser" type="button">⌫</button>
+    </div>
+    <div class="divider"></div>
+
+    <div class="size-group">
+      <button class="size-btn" data-size="2" type="button">2</button>
+      <button class="size-btn active" data-size="4" type="button">4</button>
+      <button class="size-btn" data-size="8" type="button">8</button>
+      <button class="size-btn" data-size="20" type="button">20</button>
+    </div>
+    <div class="divider"></div>
+
+    <div class="color-group">
+      <button class="color-btn active" data-color="#1a1a2e" style="background:#1a1a2e;" type="button"></button>
+      <button class="color-btn" data-color="#ff3b30" style="background:#ff3b30;" type="button"></button>
+      <button class="color-btn" data-color="#007aff" style="background:#007aff;" type="button"></button>
+      <button class="color-btn" data-color="#34c759" style="background:#34c759;" type="button"></button>
+      <button class="color-btn" data-color="#ff9500" style="background:#ff9500;" type="button"></button>
+      <button class="color-btn" data-color="#af52de" style="background:#af52de;" type="button"></button>
+    </div>
+  </div>
+
   <div id="canvas-wrap">
     <canvas id="draw-surface"></canvas>
   </div>
+  
   <script src="store.js"></script>
   <script src="canvas.js"></script>
 </body>
