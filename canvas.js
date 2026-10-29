@@ -69,9 +69,9 @@
     const h = canvasEl.clientHeight;
     let spacing = 100;
     
-    // DYNAMIC GRID: Adjust spacing based on zoom to prevent lag
-    while (spacing * camera.scale < 40) spacing *= 2;
-    while (spacing * camera.scale > 80) spacing /= 2;
+    // DYNAMIC GRID: Keep grid spacing reasonable on screen
+    while (spacing * camera.scale < 30) spacing *= 2;
+    while (spacing * camera.scale > 60) spacing /= 2;
 
     c.save();
     c.fillStyle = "#d0d0d8";
@@ -80,6 +80,7 @@
     const startX = Math.floor(tl.x / spacing) * spacing;
     const startY = Math.floor(tl.y / spacing) * spacing;
     
+    // Only render dots that are physically on screen
     for (let wx = startX; wx <= br.x; wx += spacing) {
       for (let wy = startY; wy <= br.y; wy += spacing) {
         const s = worldToScreen(wx, wy);
@@ -93,6 +94,10 @@
 
   function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
+    
+    // CULLING: If line width is less than 0.5 pixels, don't bother rendering
+    if ((stroke.width || 4) * camera.scale < 0.5) return;
+
     c.save();
     c.lineCap = "round";
     c.lineJoin = "round";
@@ -134,9 +139,6 @@
     drawGrid(bgCtx);
     
     if (canvasData) {
-      const viewRect = camera.worldRect ? camera.worldRect(canvasEl.clientWidth / camera.scale, canvasEl.clientHeight / camera.scale) : null;
-      
-      // CULLING: Skip drawing strokes outside the view
       const viewLeft = camera.x - (canvasEl.clientWidth / 2) / camera.scale;
       const viewRight = camera.x + (canvasEl.clientWidth / 2) / camera.scale;
       const viewTop = camera.y - (canvasEl.clientHeight / 2) / camera.scale;
@@ -145,7 +147,7 @@
       for (let i = 0; i < canvasData.strokes.length; i++) {
         const s = canvasData.strokes[i];
         if (s.points.length > 0) {
-          // Simple bounding box check for culling
+          // BOUNDING BOX CULLING
           let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
           for (let j = 0; j < s.points.length; j++) {
             if (s.points[j].x < minX) minX = s.points[j].x;
@@ -153,7 +155,8 @@
             if (s.points[j].y < minY) minY = s.points[j].y;
             if (s.points[j].y > maxY) maxY = s.points[j].y;
           }
-          // Add padding for line width
+          
+          // If completely outside screen, skip rendering
           if (maxX < viewLeft || minX > viewRight || maxY < viewTop || minY > viewBottom) continue;
         }
         drawStrokeOn(bgCtx, s, s.isEraser);
@@ -186,18 +189,16 @@
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
     }
 
-    // STRICT PALM REJECTION: Ignore touch if Pencil is drawing
     if (e.pointerType === "touch" && isPenDrawing) return;
 
     const rect = canvasEl.getBoundingClientRect();
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
 
-    // TWO FINGER PAN/ZOOM (Fingers never draw)
     if (e.pointerType === "touch") {
       pointers.set(e.pointerId, { x: localX, y: localY });
       if (pointers.size === 2) {
-        currentStroke = null; // Cancel accidental stroke
+        currentStroke = null;
         const pts = Array.from(pointers.values());
         const dx = pts[1].x - pts[0].x;
         const dy = pts[1].y - pts[0].y;
@@ -212,7 +213,6 @@
       return;
     }
 
-    // ONE DRAWER LIMIT: Only Pen or Mouse
     if ((e.pointerType === "pen" || e.pointerType === "mouse") && pointers.size === 0) {
       if (e.pointerType === "pen") isPenDrawing = true;
       pointers.set(e.pointerId, { x: localX, y: localY });
@@ -260,7 +260,13 @@
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
       const mid = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
       const ratio = dist / gesture.startDist;
-      const newScale = Math.max(0.1, Math.min(20, gesture.startCam.scale * ratio));
+      
+      // INFINITE ZOOM: Removed the 0.1 - 20 clamp
+      let newScale = gesture.startCam.scale * ratio;
+      
+      // Safety bound just to prevent NaN/Infinity calculation errors
+      newScale = Math.max(0.0001, Math.min(100000, newScale));
+
       const vw = canvasEl.clientWidth;
       const vh = canvasEl.clientHeight;
       const startWorld = {
@@ -340,14 +346,17 @@
     if (isFinite(minX) && isFinite(minY)) {
       camera.x = (minX + maxX) / 2;
       camera.y = (minY + maxY) / 2;
-      // Zoom to fit
+      
       const w = canvasEl.clientWidth;
       const h = canvasEl.clientHeight;
-      const contentW = maxX - minX + 100;
-      const contentH = maxY - minY + 100;
-      camera.scale = Math.min(w / contentW, h / contentH);
-      camera.scale = Math.max(0.1, Math.min(20, camera.scale));
-      document.getElementById("zoom-indicator").textContent = Math.round(camera.scale * 100) + "%";
+      const contentW = maxX - minX + 200; // Add padding
+      const contentH = maxY - minY + 200;
+      
+      let newScale = Math.min(w / contentW, h / contentH);
+      newScale = Math.max(0.0001, Math.min(100000, newScale)); // Prevent Infinity
+      
+      camera.scale = newScale;
+      document.getElementById("zoom-indicator").textContent = Math.round(newScale * 100) + "%";
       invalidateBackground();
       redraw();
     }
