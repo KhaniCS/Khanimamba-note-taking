@@ -8,13 +8,27 @@
   <title>Inkloom</title>
   <link rel="stylesheet" href="styles.css">
   
-  <!-- GLOBAL ERROR CATCHER: Runs before anything else -->
   <script>
-    window.addEventListener('error', function(e) {
+    function showError(msg) {
       var d = document.createElement("div");
-      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:red;color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;";
-      d.textContent = "CRASH: " + e.message + " in " + (e.filename || "unknown file");
+      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:red;color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;box-shadow:0 4px 6px rgba(0,0,0,0.3);";
+      d.textContent = "CRASH: " + msg;
       document.body.appendChild(d);
+    }
+    
+    // Make it available to app.js and store.js
+    window.showError = showError;
+    
+    window.addEventListener('error', function(e) {
+      if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+        showError("Failed to load file: " + (e.target.src || e.target.href));
+      } else {
+        showError(e.message + " in " + (e.filename || "unknown file"));
+      }
+    }, true);
+
+    window.addEventListener('unhandledrejection', function(e) {
+      showError("Database/Async error: " + e.reason);
     });
   </script>
 </head>
