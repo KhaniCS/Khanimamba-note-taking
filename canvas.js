@@ -18,6 +18,10 @@
 
   const MIN_SCALE = 0.000000001;
   const MAX_SCALE = 1000000000;
+  
+  // HOW FAR YOU MUST ZOOM OUT BEFORE A STROKE DISAPPEARS
+  // 0.1 means it disappears when zoomed out to 10% of its original drawn size
+  const CULL_FACTOR = 0.1;
 
   const camera = { x: 0, y: 0, scale: 1, rotation: 0 };
   const pointers = new Map();
@@ -125,9 +129,9 @@
   function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
     
-    // CULLING: Don't draw if the line is smaller than 2 pixels
+    // Absolute safety limit for physical pixels
     const screenWidth = (stroke.width || 4) * camera.scale;
-    if (screenWidth < 2) return;
+    if (screenWidth < 0.1) return;
 
     c.save();
     c.lineCap = "round";
@@ -182,6 +186,11 @@
       for (let i = 0; i < canvasData.strokes.length; i++) {
         const s = canvasData.strokes[i];
         if (s.points.length > 0) {
+          
+          // FACTOR CULLING: Does this stroke belong to a zoom level far bigger than right now?
+          const originScale = s.originScale || 1.0;
+          if (camera.scale < originScale * CULL_FACTOR) continue;
+
           let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
           for (let j = 0; j < s.points.length; j++) {
             if (s.points[j].x < minX) minX = s.points[j].x;
@@ -191,13 +200,6 @@
           }
           
           if (maxX < viewLeft || minX > viewRight || maxY < viewTop || minY > viewBottom) continue;
-          
-          if (s.points.length > 1) {
-            const screenW = (maxX - minX) * camera.scale;
-            const screenH = (maxY - minY) * camera.scale;
-            // If the entire stroke is smaller than 2 pixels, skip it
-            if (Math.max(screenW, screenH) < 2) continue;
-          }
         }
         drawStrokeOn(bgCtx, s, s.isEraser);
       }
@@ -272,7 +274,8 @@
         points: [{ x: w.x, y: w.y }],
         color: currentColor,
         width: currentSize,
-        isEraser: currentTool === "eraser"
+        isEraser: currentTool === "eraser",
+        originScale: camera.scale // <--- Record the zoom level!
       };
       gesture = { type: "draw" };
     }
@@ -455,7 +458,6 @@
 
     document.getElementById('lost-btn').addEventListener('click', centerOnContent);
     
-    // UPDATED LOCK BUTTON: Toggles the blue color
     var lockBtn = document.getElementById('rotate-lock-btn');
     lockBtn.addEventListener('click', function() {
       rotationLocked = !rotationLocked;
