@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Inkloom">
+  <title>Inkloom</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header id="library-header">
+    <h1>Inkloom</h1>
+    <button id="new-canvas-btn" type="button" aria-label="New canvas">+</button>
+  </header>
+  <main id="library-main">
+    <p id="empty-message" hidden>No canvases yet. Tap + to start one.</p>
+    <ul id="canvas-list"></ul>
+  </main>
+  <div id="new-canvas-dialog" class="modal" hidden>
+    <div class="modal-card">
+      <h2>New canvas</h2>
+      <input id="new-canvas-title" type="text" placeholder="Title" autocomplete="off">
+      <div class="modal-actions">
+        <button id="cancel-new-canvas" type="button">Cancel</button>
+        <button id="confirm-new-canvas" type="button" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
