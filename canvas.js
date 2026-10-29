@@ -36,7 +36,7 @@
   // --- SAVE TIMERS ---
   let saveTimer = null;
 
-  // --- PEN STATE (deferred math) ---
+  // --- PEN STATE ---
   let prevMidScreen = null;
   let lastScreenPoint = null;
   let screenPoints = [];
@@ -293,7 +293,7 @@
     });
   }
 
-  // --- SAVING ---
+  // --- SAVING MAGIC ---
   function requestSave() {
     if (!canvasData) return;
     canvasData.modifiedAt = Date.now();
@@ -341,7 +341,6 @@
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
 
-    // Physically detach touch listeners so palms cannot interfere
     canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
     canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
     canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
@@ -356,7 +355,6 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
 
-    // Snapshot camera. Used later for the deferred world conversion.
     strokeOriginCamera = {
       x: camera.x, y: camera.y,
       scale: camera.scale, rotation: camera.rotation
@@ -406,13 +404,11 @@
 
       const newMidScreen = { x: (lastScreenPoint.x + sx) / 2, y: (lastScreenPoint.y + sy) / 2 };
 
-      // Pure screen-space drawing. No world math.
       ctx.beginPath();
       ctx.moveTo(prevMidScreen.x, prevMidScreen.y);
       ctx.quadraticCurveTo(lastScreenPoint.x, lastScreenPoint.y, newMidScreen.x, newMidScreen.y);
       ctx.stroke();
 
-      // Just store raw screen points. Convert later.
       screenPoints.push({ x: sx, y: sy });
 
       prevMidScreen = newMidScreen;
@@ -429,14 +425,12 @@
     }
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
-    // Reattach touch listeners
     canvasEl.addEventListener("touchstart", touchStart, { passive: true });
     canvasEl.addEventListener("touchmove", touchMove, { passive: false });
     canvasEl.addEventListener("touchend", touchEnd, { passive: true });
     canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
 
     if (gesture && gesture.type === "draw" && currentStroke) {
-      // Draw the tail segment
       if (lastScreenPoint) {
         ctx.save();
         setupStrokeCtx(ctx, currentStroke);
@@ -447,7 +441,6 @@
         ctx.restore();
       }
 
-      // --- DEFERRED MATH: batch convert screenPoints to world coords ---
       if (strokeOriginCamera && screenPoints.length > 0) {
         const c = strokeOriginCamera;
         const cos = Math.cos(-c.rotation);
@@ -670,6 +663,12 @@
   }
 
   function setupEvents() {
+    // THE FIX: Kill the Apple Pencil long-press context menu entirely
+    canvasEl.addEventListener("contextmenu", function(ev) { ev.preventDefault(); });
+    canvasEl.addEventListener("selectstart", function(ev) { ev.preventDefault(); });
+    document.addEventListener("contextmenu", function(ev) { ev.preventDefault(); });
+    document.addEventListener("selectstart", function(ev) { ev.preventDefault(); });
+
     canvasEl.addEventListener("pointerdown", penDown);
     canvasEl.addEventListener("pointermove", penMove);
     canvasEl.addEventListener("pointerup", penUp);
