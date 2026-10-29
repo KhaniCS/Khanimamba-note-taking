@@ -22,7 +22,6 @@
   const CULL_FACTOR = 0.1;
 
   const camera = { x: 0, y: 0, scale: 1, rotation: 0 };
-  const pointers = new Map();
   let gesture = null;
   let currentStroke = null;
   let pendingSave = null;
@@ -36,6 +35,12 @@
 
   // --- SAVE TIMERS ---
   let saveTimer = null;
+
+  // --- PEN STATE (deferred math) ---
+  let prevMidScreen = null;
+  let lastScreenPoint = null;
+  let screenPoints = [];
+  let strokeOriginCamera = null;
 
   // --- QUADTREE ---
   class QuadTree {
@@ -215,7 +220,7 @@
     c.restore();
   }
 
-  function drawStrokeOn(c, stroke, isEraser) {
+  function drawStrokeOn(c, stroke) {
     if (!stroke.points || stroke.points.length === 0) return;
     const screenWidth = (stroke.width || 4) * camera.scale;
     if (screenWidth < 0.1) return;
@@ -223,8 +228,8 @@
     c.save();
     c.lineCap = "round";
     c.lineJoin = "round";
-    c.strokeStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
-    c.fillStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
+    c.strokeStyle = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
+    c.fillStyle = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     c.lineWidth = screenWidth;
 
     if (stroke.points.length === 1) {
@@ -269,7 +274,7 @@
           const originScale = s.originScale || 1.0;
           if (camera.scale < originScale * CULL_FACTOR) continue;
         }
-        drawStrokeOn(bgCtx, s, s.isEraser);
+        drawStrokeOn(bgCtx, s);
       }
     }
     bgDirty = false;
@@ -285,29 +290,23 @@
       renderBackground();
       ctx.clearRect(0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
       ctx.drawImage(bgCanvas, 0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
-      if (currentStroke) drawStrokeOn(ctx, currentStroke, currentStroke.isEraser);
     });
   }
 
-  // --- DEBOUNCED SAVING MAGIC ---
+  // --- SAVING ---
   function requestSave() {
     if (!canvasData) return;
     canvasData.modifiedAt = Date.now();
     pendingSave = canvasData;
 
     if (saveTimer) clearTimeout(saveTimer);
-
-    saveTimer = setTimeout(function() {
-      executeSave();
-    }, 5000);
+    saveTimer = setTimeout(function() { executeSave(); }, 5000);
   }
 
   function executeSave() {
     if (!pendingSave || saveInFlight) return;
-    
     saveInFlight = true;
     const overlay = document.getElementById("saving-overlay");
-    
     if (overlay) overlay.classList.add("visible");
     
     const snapshot = pendingSave;
@@ -317,7 +316,6 @@
       Store.save(snapshot).then(function () {
         saveInFlight = false;
         if (overlay) overlay.classList.remove("visible");
-        
         if (pendingSave) {
           if (saveTimer) clearTimeout(saveTimer);
           saveTimer = setTimeout(executeSave, 5000);
@@ -330,198 +328,284 @@
     }, 150); 
   }
 
-  // --- INPUT ---
-  function pointerDown(e) {
-    // 1. PEN TAKES ABSOLUTE PRIORITY
-    if (e.pointerType === "pen" || e.pointerType === "mouse") {
-      e.preventDefault();
-      if (canvasEl.setPointerCapture) {
-        try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
-      }
-      if (toolbarEl) toolbarEl.style.pointerEvents = "none";
-
-      const rect = canvasEl.getBoundingClientRect();
-      const localX = e.clientX - rect.left;
-      const localY = e.clientY - rect.top;
-      const w = screenToWorld(localX, localY);
-      
-      currentStroke = {
-        id: Store.uuid(), points: [{ x: w.x, y: w.y }],
-        color: currentColor, width: currentSize / camera.scale,
-        isEraser: currentTool === "eraser", originScale: camera.scale
-      };
-      gesture = { type: "draw" };
-      redraw();
-      return;
-    }
-
-    // 2. TOUCHES (PAN & ZOOM)
-    if (e.pointerType === "touch") {
-      const rect = canvasEl.getBoundingClientRect();
-      const localX = e.clientX - rect.left;
-      const localY = e.clientY - rect.top;
-
-      pointers.set(e.pointerId, { x: localX, y: localY });
-      
-      if (pointers.size === 1) {
-        // Start a "pending" pan. We wait for movement before actually panning.
-        gesture = { type: "pending_pan", startX: localX, startY: localY };
-      } else if (pointers.size === 2) {
-        const pts = Array.from(pointers.values());
-        const dx = pts[1].x - pts[0].x;
-        const dy = pts[1].y - pts[0].y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const angle = Math.atan2(dy, dx);
-        const midX = (pts[0].x + pts[1].x) / 2;
-        const midY = (pts[0].y + pts[1].y) / 2;
-        const startWorld = screenToWorld(midX, midY);
-        gesture = {
-          type: "pinch", startDist: dist, startAngle: angle,
-          startScale: camera.scale, startRotation: camera.rotation,
-          startMid: { x: midX, y: midY }, startWorld: startWorld
-        };
-      }
-    }
+  // --- 1. PEN INPUT (ZERO MATH WHILE DRAWING) ---
+  function setupStrokeCtx(c, stroke) {
+    c.lineCap = "round";
+    c.lineJoin = "round";
+    c.strokeStyle = stroke.isEraser ? "#fbfaf7" : stroke.color;
+    c.fillStyle = stroke.isEraser ? "#fbfaf7" : stroke.color;
+    c.lineWidth = stroke.width * camera.scale;
   }
 
-  function pointerMove(e) {
+  function penDown(e) {
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    e.preventDefault();
+
+    // Physically detach touch listeners so palms cannot interfere
+    canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
+    canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
+    canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
+    canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
+
+    if (canvasEl.setPointerCapture) {
+      try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
+    }
+    if (toolbarEl) toolbarEl.style.pointerEvents = "none";
+
     const rect = canvasEl.getBoundingClientRect();
-    const localX = e.clientX - rect.left;
-    const localY = e.clientY - rect.top;
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
 
-    // 1. PEN DRAWING
-    if (e.pointerType === "pen" || e.pointerType === "mouse") {
-      if (gesture && gesture.type === "draw" && currentStroke) {
-        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-        for (let i = 0; i < events.length; i++) {
-          const ev = events[i];
-          const w = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
-          
-          if (currentStroke.points.length > 0) {
-            const last = currentStroke.points[currentStroke.points.length - 1];
-            const dx = (w.x - last.x) * camera.scale;
-            const dy = (w.y - last.y) * camera.scale;
-            if ((dx * dx) + (dy * dy) < 2.25) continue;
-          }
-          currentStroke.points.push({ x: w.x, y: w.y });
-        }
-        redraw();
-      }
-      return; 
+    // Snapshot camera. Used later for the deferred world conversion.
+    strokeOriginCamera = {
+      x: camera.x, y: camera.y,
+      scale: camera.scale, rotation: camera.rotation
+    };
+
+    currentStroke = {
+      id: Store.uuid(),
+      points: [],
+      color: currentColor,
+      width: currentSize / camera.scale,
+      isEraser: currentTool === "eraser",
+      originScale: camera.scale
+    };
+    gesture = { type: "draw" };
+
+    lastScreenPoint = { x: sx, y: sy };
+    prevMidScreen = { x: sx, y: sy };
+    screenPoints = [{ x: sx, y: sy }];
+
+    ctx.save();
+    setupStrokeCtx(ctx, currentStroke);
+    ctx.beginPath();
+    ctx.arc(sx, sy, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function penMove(e) {
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (!currentStroke || !gesture || gesture.type !== "draw") return;
+    if (!lastScreenPoint) return;
+
+    const rect = canvasEl.getBoundingClientRect();
+    const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+
+    ctx.save();
+    setupStrokeCtx(ctx, currentStroke);
+
+    for (let i = 0; i < events.length; i++) {
+      const ev = events[i];
+      const sx = ev.clientX - rect.left;
+      const sy = ev.clientY - rect.top;
+
+      const dx = sx - lastScreenPoint.x;
+      const dy = sy - lastScreenPoint.y;
+      if ((dx * dx) + (dy * dy) < 2.25) continue;
+
+      const newMidScreen = { x: (lastScreenPoint.x + sx) / 2, y: (lastScreenPoint.y + sy) / 2 };
+
+      // Pure screen-space drawing. No world math.
+      ctx.beginPath();
+      ctx.moveTo(prevMidScreen.x, prevMidScreen.y);
+      ctx.quadraticCurveTo(lastScreenPoint.x, lastScreenPoint.y, newMidScreen.x, newMidScreen.y);
+      ctx.stroke();
+
+      // Just store raw screen points. Convert later.
+      screenPoints.push({ x: sx, y: sy });
+
+      prevMidScreen = newMidScreen;
+      lastScreenPoint = { x: sx, y: sy };
     }
+    ctx.restore();
+  }
 
-    // 2. TOUCHES
-    if (e.pointerType === "touch") {
-      if (!pointers.has(e.pointerId)) return;
-      pointers.set(e.pointerId, { x: localX, y: localY });
+  function penUp(e) {
+    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
 
-      // PENDING PAN: Wait for the finger to move at least 15 pixels
-      if (gesture && gesture.type === "pending_pan") {
-        const dx = localX - gesture.startX;
-        const dy = localY - gesture.startY;
-        const distSq = (dx * dx) + (dy * dy);
-        
-        if (distSq > 225) { // 15 pixels squared
-          gesture = { type: "pan", lastX: localX, lastY: localY };
-        }
-      } 
-      // ACTIVE PAN: Move the camera
-      else if (gesture && gesture.type === "pan" && pointers.size === 1) {
-        const dx = localX - gesture.lastX;
-        const dy = localY - gesture.lastY;
-        const cos = Math.cos(-camera.rotation);
-        const sin = Math.sin(-camera.rotation);
-        camera.x -= (dx * cos - dy * sin) / camera.scale;
-        camera.y -= (dx * sin + dy * cos) / camera.scale;
-        gesture.lastX = localX;
-        gesture.lastY = localY;
-        invalidateBackground();
-        redraw();
+    if (canvasEl.releasePointerCapture) {
+      try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
+    }
+    if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
-      } else if (gesture && gesture.type === "pinch" && pointers.size >= 2) {
-        const pts = Array.from(pointers.values());
-        const dx = pts[1].x - pts[0].x;
-        const dy = pts[1].y - pts[0].y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const currentAngle = Math.atan2(dy, dx);
-        const midX = (pts[0].x + pts[1].x) / 2;
-        const midY = (pts[0].y + pts[1].y) / 2;
-        const ratio = dist / gesture.startDist;
-        
-        let newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, gesture.startScale * ratio));
-        let newRotation = gesture.startRotation;
-        
-        if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
-          newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
-        }
-        
-        const mdx = midX - canvasEl.clientWidth / 2;
-        const mdy = midY - canvasEl.clientHeight / 2;
-        const cosNeg = Math.cos(-newRotation);
-        const sinNeg = Math.sin(-newRotation);
-        
-        camera.scale = newScale;
-        camera.rotation = newRotation;
-        camera.x = gesture.startWorld.x - (mdx * cosNeg - mdy * sinNeg) / newScale;
-        camera.y = gesture.startWorld.y - (mdx * sinNeg + mdy * cosNeg) / newScale;
-        
-        updateIndicators();
-        invalidateBackground();
-        redraw();
+    // Reattach touch listeners
+    canvasEl.addEventListener("touchstart", touchStart, { passive: true });
+    canvasEl.addEventListener("touchmove", touchMove, { passive: false });
+    canvasEl.addEventListener("touchend", touchEnd, { passive: true });
+    canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
+
+    if (gesture && gesture.type === "draw" && currentStroke) {
+      // Draw the tail segment
+      if (lastScreenPoint) {
+        ctx.save();
+        setupStrokeCtx(ctx, currentStroke);
+        ctx.beginPath();
+        ctx.moveTo(prevMidScreen.x, prevMidScreen.y);
+        ctx.lineTo(lastScreenPoint.x, lastScreenPoint.y);
+        ctx.stroke();
+        ctx.restore();
       }
+
+      // --- DEFERRED MATH: batch convert screenPoints to world coords ---
+      if (strokeOriginCamera && screenPoints.length > 0) {
+        const c = strokeOriginCamera;
+        const cos = Math.cos(-c.rotation);
+        const sin = Math.sin(-c.rotation);
+        const cx = canvasEl.clientWidth / 2;
+        const cy = canvasEl.clientHeight / 2;
+
+        for (let i = 0; i < screenPoints.length; i++) {
+          const px = screenPoints[i].x - cx;
+          const py = screenPoints[i].y - cy;
+          currentStroke.points.push({
+            x: (px * cos - py * sin) / c.scale + c.x,
+            y: (px * sin + py * cos) / c.scale + c.y
+          });
+        }
+      }
+
+      if (currentStroke.points.length > 0 && canvasData) {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (let i = 0; i < currentStroke.points.length; i++) {
+          if (currentStroke.points[i].x < minX) minX = currentStroke.points[i].x;
+          if (currentStroke.points[i].x > maxX) maxX = currentStroke.points[i].x;
+          if (currentStroke.points[i].y < minY) minY = currentStroke.points[i].y;
+          if (currentStroke.points[i].y > maxY) maxY = currentStroke.points[i].y;
+        }
+        currentStroke.bounds = { minX, minY, maxX, maxY };
+        canvasData.strokes.push(currentStroke);
+        if (strokeTree) strokeTree.insert(currentStroke);
+        drawStrokeOn(bgCtx, currentStroke);
+        requestSave();
+      }
+
+      currentStroke = null;
+      gesture = null;
+      lastScreenPoint = null;
+      prevMidScreen = null;
+      screenPoints = [];
+      strokeOriginCamera = null;
     }
   }
 
-  function pointerUp(e) {
-    // 1. PEN LIFT
-    if (e.pointerType === "pen" || e.pointerType === "mouse") {
-      if (toolbarEl) toolbarEl.style.pointerEvents = "auto"; 
-      if (canvasEl.releasePointerCapture) {
-        try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
-      }
-      if (gesture && gesture.type === "draw" && currentStroke) {
-        if (currentStroke.points.length > 0 && canvasData) {
-          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-          for (let i = 0; i < currentStroke.points.length; i++) {
-            if (currentStroke.points[i].x < minX) minX = currentStroke.points[i].x;
-            if (currentStroke.points[i].x > maxX) maxX = currentStroke.points[i].x;
-            if (currentStroke.points[i].y < minY) minY = currentStroke.points[i].y;
-            if (currentStroke.points[i].y > maxY) maxY = currentStroke.points[i].y;
-          }
-          currentStroke.bounds = { minX, minY, maxX, maxY };
-          canvasData.strokes.push(currentStroke);
-          if (strokeTree) strokeTree.insert(currentStroke);
-          drawStrokeOn(bgCtx, currentStroke, currentStroke.isEraser);
-          requestSave(); 
-        }
-        currentStroke = null;
-        gesture = null;
-      }
-      redraw();
-      return;
+  // --- 2. TOUCH INPUT (PAN & ZOOM) ---
+  function touchStart(e) {
+    if (gesture && gesture.type === "draw") return;
+
+    const rect = canvasEl.getBoundingClientRect();
+    
+    if (e.touches.length === 1) {
+      const t = e.touches[0];
+      gesture = { type: "pending_pan", startX: t.clientX - rect.left, startY: t.clientY - rect.top };
+    } else if (e.touches.length === 2) {
+      const t0 = e.touches[0];
+      const t1 = e.touches[1];
+      const dx = (t1.clientX - rect.left) - (t0.clientX - rect.left);
+      const dy = (t1.clientY - rect.top) - (t0.clientY - rect.top);
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const angle = Math.atan2(dy, dx);
+      const midX = (t0.clientX - rect.left + t1.clientX - rect.left) / 2;
+      const midY = (t0.clientY - rect.top + t1.clientY - rect.top) / 2;
+      const startWorld = screenToWorld(midX, midY);
+      
+      gesture = {
+        type: "pinch", startDist: dist, startAngle: angle,
+        startScale: camera.scale, startRotation: camera.rotation,
+        startMid: { x: midX, y: midY }, startWorld: startWorld
+      };
+    }
+  }
+
+  function touchMove(e) {
+    if (gesture && gesture.type === "draw") return;
+    if (!gesture) return;
+
+    if (gesture.type === "pan" || gesture.type === "pinch") {
+      e.preventDefault(); 
     }
 
-    // 2. TOUCH LIFT
-    if (e.pointerType === "touch") {
-      pointers.delete(e.pointerId);
+    const rect = canvasEl.getBoundingClientRect();
+
+    if (gesture.type === "pending_pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const localX = t.clientX - rect.left;
+      const localY = t.clientY - rect.top;
       
-      if (pointers.size === 0) {
-        if (gesture && gesture.type === "pinch") {
-          if (!rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
-            camera.rotation = 0;
-            rotationSnapHoldUntil = Date.now() + 1000;
-            updateIndicators();
-            invalidateBackground();
-          }
-        }
-        gesture = null;
-        redraw();
-      } else if (pointers.size === 1 && (gesture && (gesture.type === "pinch" || gesture.type === "pan"))) {
-        // Seamless transition back to pending_pan for the remaining finger
-        const remaining = Array.from(pointers.values())[0];
-        gesture = { type: "pending_pan", startX: remaining.x, startY: remaining.y };
-        redraw();
+      const dx = localX - gesture.startX;
+      const dy = localY - gesture.startY;
+      
+      if ((dx * dx) + (dy * dy) > 225) {
+        gesture = { type: "pan", lastX: localX, lastY: localY };
       }
+    } else if (gesture.type === "pan" && e.touches.length === 1) {
+      const t = e.touches[0];
+      const localX = t.clientX - rect.left;
+      const localY = t.clientY - rect.top;
+      
+      const dx = localX - gesture.lastX;
+      const dy = localY - gesture.lastY;
+      const cos = Math.cos(-camera.rotation);
+      const sin = Math.sin(-camera.rotation);
+      
+      camera.x -= (dx * cos - dy * sin) / camera.scale;
+      camera.y -= (dx * sin + dy * cos) / camera.scale;
+      gesture.lastX = localX;
+      gesture.lastY = localY;
+      invalidateBackground();
+      redraw();
+    } else if (gesture.type === "pinch" && e.touches.length >= 2) {
+      const t0 = e.touches[0];
+      const t1 = e.touches[1];
+      const dx = (t1.clientX - rect.left) - (t0.clientX - rect.left);
+      const dy = (t1.clientY - rect.top) - (t0.clientY - rect.top);
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const currentAngle = Math.atan2(dy, dx);
+      const midX = (t0.clientX - rect.left + t1.clientX - rect.left) / 2;
+      const midY = (t0.clientY - rect.top + t1.clientY - rect.top) / 2;
+      const ratio = dist / gesture.startDist;
+      
+      let newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, gesture.startScale * ratio));
+      let newRotation = gesture.startRotation;
+      
+      if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
+        newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
+      }
+      
+      const mdx = midX - canvasEl.clientWidth / 2;
+      const mdy = midY - canvasEl.clientHeight / 2;
+      const cosNeg = Math.cos(-newRotation);
+      const sinNeg = Math.sin(-newRotation);
+      
+      camera.scale = newScale;
+      camera.rotation = newRotation;
+      camera.x = gesture.startWorld.x - (mdx * cosNeg - mdy * sinNeg) / newScale;
+      camera.y = gesture.startWorld.y - (mdx * sinNeg + mdy * cosNeg) / newScale;
+      
+      updateIndicators();
+      invalidateBackground();
+      redraw();
+    }
+  }
+
+  function touchEnd(e) {
+    if (gesture && gesture.type === "draw") return;
+    if (!gesture) return;
+
+    if (e.touches.length === 0) {
+      if (gesture.type === "pinch") {
+        if (!rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+          camera.rotation = 0;
+          rotationSnapHoldUntil = Date.now() + 1000;
+          updateIndicators();
+          invalidateBackground();
+        }
+      }
+      gesture = null;
+      redraw();
+    } else if (e.touches.length === 1 && gesture.type === "pinch") {
+      const t = e.touches[0];
+      gesture = { type: "pending_pan", startX: t.clientX - rect.left, startY: t.clientY - rect.top };
     }
   }
 
@@ -586,10 +670,16 @@
   }
 
   function setupEvents() {
-    canvasEl.addEventListener("pointerdown", pointerDown);
-    canvasEl.addEventListener("pointermove", pointerMove);
-    canvasEl.addEventListener("pointerup", pointerUp);
-    canvasEl.addEventListener("pointercancel", pointerUp);
+    canvasEl.addEventListener("pointerdown", penDown);
+    canvasEl.addEventListener("pointermove", penMove);
+    canvasEl.addEventListener("pointerup", penUp);
+    canvasEl.addEventListener("pointercancel", penUp);
+
+    canvasEl.addEventListener("touchstart", touchStart, { passive: true });
+    canvasEl.addEventListener("touchmove", touchMove, { passive: false });
+    canvasEl.addEventListener("touchend", touchEnd, { passive: true });
+    canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
+    
     document.getElementById("back-btn").addEventListener("click", function () {
       if (saveInFlight || pendingSave) {
         if (window.showError) window.showError("Saving... please wait.");
@@ -598,6 +688,7 @@
         window.location.href = "index.html";
       }
     });
+    
     wireToolbar();
   }
 
