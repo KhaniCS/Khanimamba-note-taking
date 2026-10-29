@@ -26,7 +26,6 @@
   let currentStroke = null;
   let pendingSave = null;
   let saveInFlight = false;
-  let isPenDrawing = false;
 
   let currentTool = "pen";
   let currentSize = 4;
@@ -307,17 +306,13 @@
     saveInFlight = true;
     const overlay = document.getElementById("saving-overlay");
     
-    // 1. Start the animation immediately
     if (overlay) overlay.classList.add("visible");
     
     const snapshot = pendingSave;
     pendingSave = null;
     
-    // 2. Wait 150ms before starting the actual database save
     setTimeout(function() {
-      
       Store.save(snapshot).then(function () {
-        // 3. They end at the same time: hide the overlay exactly when the save finishes
         saveInFlight = false;
         if (overlay) overlay.classList.remove("visible");
         
@@ -330,25 +325,43 @@
         if (overlay) overlay.classList.remove("visible");
         if (window.showError) window.showError("Could not save: " + err);
       });
-      
-    }, 150); // 150ms delay
+    }, 150); 
   }
 
   // --- INPUT ---
   function pointerDown(e) {
-    e.preventDefault();
-    if (canvasEl.setPointerCapture) {
-      try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
+    if (e.pointerType !== "touch") {
+      e.preventDefault();
+      if (canvasEl.setPointerCapture) {
+        try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
+      }
     }
-    if (e.pointerType === "touch" && isPenDrawing) return;
 
     const rect = canvasEl.getBoundingClientRect();
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
 
+    // 1. PEN TAKES ABSOLUTE PRIORITY
+    if (e.pointerType === "pen" || e.pointerType === "mouse") {
+      pointers.clear(); 
+      const w = screenToWorld(localX, localY);
+      currentStroke = {
+        id: Store.uuid(), points: [{ x: w.x, y: w.y }],
+        color: currentColor, width: currentSize / camera.scale,
+        isEraser: currentTool === "eraser", originScale: camera.scale
+      };
+      gesture = { type: "draw" };
+      redraw();
+      return;
+    }
+
+    // 2. TOUCHES (PAN & ZOOM)
     if (e.pointerType === "touch") {
       pointers.set(e.pointerId, { x: localX, y: localY });
-      if (pointers.size === 2) {
+      
+      if (pointers.size === 1) {
+        gesture = { type: "pan", lastX: localX, lastY: localY };
+      } else if (pointers.size === 2) {
         currentStroke = null;
         const pts = Array.from(pointers.values());
         const dx = pts[1].x - pts[0].x;
@@ -364,125 +377,146 @@
           startMid: { x: midX, y: midY }, startWorld: startWorld
         };
       }
-      return;
     }
-
-    if ((e.pointerType === "pen" || e.pointerType === "mouse") && pointers.size === 0) {
-      if (e.pointerType === "pen") isPenDrawing = true;
-      pointers.set(e.pointerId, { x: localX, y: localY });
-      const w = screenToWorld(localX, localY);
-      currentStroke = {
-        id: Store.uuid(), points: [{ x: w.x, y: w.y }],
-        color: currentColor, width: currentSize / camera.scale,
-        isEraser: currentTool === "eraser", originScale: camera.scale
-      };
-      gesture = { type: "draw" };
-    }
-    redraw();
   }
 
   function pointerMove(e) {
-    if (e.pointerType === "touch" && isPenDrawing) return;
-    if (!pointers.has(e.pointerId)) return;
-    
-    e.preventDefault();
     const rect = canvasEl.getBoundingClientRect();
     const localX = e.clientX - rect.left;
     const localY = e.clientY - rect.top;
-    pointers.set(e.pointerId, { x: localX, y: localY });
 
-    if (gesture && gesture.type === "draw" && currentStroke && pointers.size === 1) {
-      if (e.pointerType === "touch") return;
-      const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-      for (let i = 0; i < events.length; i++) {
-        const ev = events[i];
-        const w = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
-        
-        if (currentStroke.points.length > 0) {
-          const last = currentStroke.points[currentStroke.points.length - 1];
-          const dx = (w.x - last.x) * camera.scale;
-          const dy = (w.y - last.y) * camera.scale;
-          const distSq = (dx * dx) + (dy * dy);
-          if (distSq < 2.25) continue;
+    // 1. PEN / MOUSE DRAWING
+    if (e.pointerType === "pen" || e.pointerType === "mouse") {
+      if (gesture && gesture.type === "draw" && currentStroke) {
+        const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+        for (let i = 0; i < events.length; i++) {
+          const ev = events[i];
+          const w = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+          
+          if (currentStroke.points.length > 0) {
+            const last = currentStroke.points[currentStroke.points.length - 1];
+            const dx = (w.x - last.x) * camera.scale;
+            const dy = (w.y - last.y) * camera.scale;
+            if ((dx * dx) + (dy * dy) < 2.25) continue;
+          }
+          currentStroke.points.push({ x: w.x, y: w.y });
         }
-        currentStroke.points.push({ x: w.x, y: w.y });
+        redraw();
       }
-      redraw();
-    } else if (gesture && gesture.type === "pinch" && pointers.size >= 2) {
-      const pts = Array.from(pointers.values());
-      const dx = pts[1].x - pts[0].x;
-      const dy = pts[1].y - pts[0].y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const currentAngle = Math.atan2(dy, dx);
-      const midX = (pts[0].x + pts[1].x) / 2;
-      const midY = (pts[0].y + pts[1].y) / 2;
-      const vw = canvasEl.clientWidth;
-      const vh = canvasEl.clientHeight;
-      const ratio = dist / gesture.startDist;
-      
-      let newScale = gesture.startScale * ratio;
-      newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
-      let newRotation = gesture.startRotation;
-      if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
-        newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
+      return; 
+    }
+
+    // 2. TOUCHES (PAN & ZOOM)
+    if (e.pointerType === "touch") {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: localX, y: localY });
+
+      if (gesture && gesture.type === "pan" && pointers.size === 1) {
+        const dx = localX - gesture.lastX;
+        const dy = localY - gesture.lastY;
+        
+        const cos = Math.cos(-camera.rotation);
+        const sin = Math.sin(-camera.rotation);
+        const worldDX = (dx * cos - dy * sin) / camera.scale;
+        const worldDY = (dx * sin + dy * cos) / camera.scale;
+        
+        camera.x -= worldDX;
+        camera.y -= worldDY;
+        
+        gesture.lastX = localX;
+        gesture.lastY = localY;
+        
+        invalidateBackground();
+        redraw();
+
+      } else if (gesture && gesture.type === "pinch" && pointers.size >= 2) {
+        const pts = Array.from(pointers.values());
+        const dx = pts[1].x - pts[0].x;
+        const dy = pts[1].y - pts[0].y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const currentAngle = Math.atan2(dy, dx);
+        const midX = (pts[0].x + pts[1].x) / 2;
+        const midY = (pts[0].y + pts[1].y) / 2;
+        const vw = canvasEl.clientWidth;
+        const vh = canvasEl.clientHeight;
+        const ratio = dist / gesture.startDist;
+        
+        let newScale = gesture.startScale * ratio;
+        newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+        let newRotation = gesture.startRotation;
+        
+        if (!rotationLocked && Date.now() >= rotationSnapHoldUntil) {
+          newRotation = gesture.startRotation + (currentAngle - gesture.startAngle);
+        }
+        
+        const mdx = midX - vw / 2;
+        const mdy = midY - vh / 2;
+        const cosNeg = Math.cos(-newRotation);
+        const sinNeg = Math.sin(-newRotation);
+        const rx = mdx * cosNeg - mdy * sinNeg;
+        const ry = mdx * sinNeg + mdy * cosNeg;
+        
+        camera.scale = newScale;
+        camera.rotation = newRotation;
+        camera.x = gesture.startWorld.x - rx / newScale;
+        camera.y = gesture.startWorld.y - ry / newScale;
+        
+        updateIndicators();
+        invalidateBackground();
+        redraw();
       }
-      const mdx = midX - vw / 2;
-      const mdy = midY - vh / 2;
-      const cosNeg = Math.cos(-newRotation);
-      const sinNeg = Math.sin(-newRotation);
-      const rx = mdx * cosNeg - mdy * sinNeg;
-      const ry = mdx * sinNeg + mdy * cosNeg;
-      camera.scale = newScale;
-      camera.rotation = newRotation;
-      camera.x = gesture.startWorld.x - rx / newScale;
-      camera.y = gesture.startWorld.y - ry / newScale;
-      updateIndicators();
-      invalidateBackground();
-      redraw();
     }
   }
 
   function pointerUp(e) {
-    if (e.pointerType === "touch" && isPenDrawing) return;
-    if (!pointers.has(e.pointerId)) return;
-    e.preventDefault();
-    pointers.delete(e.pointerId);
-    if (canvasEl.releasePointerCapture) {
-      try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
-    }
-    if (e.pointerType === "pen") isPenDrawing = false;
-
-    if (gesture && gesture.type === "draw" && currentStroke) {
-      if (currentStroke.points.length > 0 && canvasData) {
-        
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (let i = 0; i < currentStroke.points.length; i++) {
-          if (currentStroke.points[i].x < minX) minX = currentStroke.points[i].x;
-          if (currentStroke.points[i].x > maxX) maxX = currentStroke.points[i].x;
-          if (currentStroke.points[i].y < minY) minY = currentStroke.points[i].y;
-          if (currentStroke.points[i].y > maxY) maxY = currentStroke.points[i].y;
+    // 1. PEN / MOUSE LIFT
+    if (e.pointerType === "pen" || e.pointerType === "mouse") {
+      if (canvasEl.releasePointerCapture) {
+        try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
+      }
+      if (gesture && gesture.type === "draw" && currentStroke) {
+        if (currentStroke.points.length > 0 && canvasData) {
+          let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+          for (let i = 0; i < currentStroke.points.length; i++) {
+            if (currentStroke.points[i].x < minX) minX = currentStroke.points[i].x;
+            if (currentStroke.points[i].x > maxX) maxX = currentStroke.points[i].x;
+            if (currentStroke.points[i].y < minY) minY = currentStroke.points[i].y;
+            if (currentStroke.points[i].y > maxY) maxY = currentStroke.points[i].y;
+          }
+          currentStroke.bounds = { minX, minY, maxX, maxY };
+          canvasData.strokes.push(currentStroke);
+          if (strokeTree) strokeTree.insert(currentStroke);
+          drawStrokeOn(bgCtx, currentStroke, currentStroke.isEraser);
+          requestSave(); 
         }
-        currentStroke.bounds = { minX, minY, maxX, maxY };
-
-        canvasData.strokes.push(currentStroke);
-        if (strokeTree) strokeTree.insert(currentStroke);
-        
-        drawStrokeOn(bgCtx, currentStroke, currentStroke.isEraser);
-        
-        requestSave(); 
+        currentStroke = null;
+        gesture = null;
       }
-      currentStroke = null;
-      gesture = null;
-    } else if (gesture && gesture.type === "pinch" && pointers.size < 2) {
-      if (!rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
-        camera.rotation = 0;
-        rotationSnapHoldUntil = Date.now() + 1000;
-        updateIndicators();
-        invalidateBackground();
-      }
-      gesture = null;
+      redraw();
+      return;
     }
-    redraw();
+
+    // 2. TOUCH LIFT
+    if (e.pointerType === "touch") {
+      pointers.delete(e.pointerId);
+      
+      if (pointers.size === 0) {
+        if (gesture && gesture.type === "pinch") {
+          if (!rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+            camera.rotation = 0;
+            rotationSnapHoldUntil = Date.now() + 1000;
+            updateIndicators();
+            invalidateBackground();
+          }
+        }
+        gesture = null;
+        redraw();
+        
+      } else if (pointers.size === 1 && gesture && gesture.type === "pinch") {
+        const remaining = Array.from(pointers.values())[0];
+        gesture = { type: "pan", lastX: remaining.x, lastY: remaining.y };
+      }
+    }
   }
 
   function centerOnContent() {
