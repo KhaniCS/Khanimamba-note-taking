@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Inkloom">
+  <title>Inkloom Canvas</title>
+  <link rel="stylesheet" href="canvas-styles.css">
+</head>
+<body>
+  <header id="canvas-header">
+    <button id="back-btn" type="button">‹ Library</button>
+    <h1 id="canvas-title">Canvas</h1>
+    <div id="canvas-actions">
+      <button id="undo-btn" type="button">Undo</button>
+      <button id="clear-btn" type="button" class="danger">Clear</button>
+    </div>
+  </header>
+  <div id="canvas-wrap">
+    <canvas id="draw-surface"></canvas>
+  </div>
+  <script src="store.js"></script>
+  <script src="canvas.js"></script>
+</body>
+</html>
