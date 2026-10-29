@@ -105,15 +105,27 @@
 
     remove: function (id) {
       return enqueue(async function () {
-        const existing = await Store.get(id);
-        if (existing) {
-          setLastDeleted(existing, 10);
-        }
-        await run("readwrite", function (store) {
-          store.delete(id);
-          return { value: true };
+        const db = await openDB();
+        return new Promise(function (resolve, reject) {
+          const tx = db.transaction(STORE, "readwrite");
+          const store = tx.objectStore(STORE);
+          const getReq = store.get(id);
+          let found = null;
+          getReq.onsuccess = function () {
+            found = getReq.result || null;
+            if (found) {
+              store.delete(id);
+            }
+          };
+          tx.oncomplete = function () {
+            if (found) {
+              setLastDeleted(found, 10);
+            }
+            resolve(true);
+          };
+          tx.onerror = function () { reject(tx.error); };
+          tx.onabort = function () { reject(tx.error || new Error("transaction aborted")); };
         });
-        return true;
       });
     },
 
