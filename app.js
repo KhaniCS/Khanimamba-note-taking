@@ -1,6 +1,24 @@
 (function () {
   "use strict";
 
+  // 1. Visual Error Handler: If anything crashes, print it in a big red box.
+  function showError(msg) {
+    var d = document.createElement("div");
+    d.style.cssText = "position:fixed;top:60px;left:10px;right:10px;background:red;color:white;padding:20px;font-size:16px;z-index:99999;border-radius:10px;font-family:sans-serif;word-wrap:break-word;";
+    d.textContent = msg;
+    document.body.appendChild(d);
+  }
+
+  window.addEventListener('error', function(e) {
+    showError("Error: " + e.message);
+  });
+
+  // 2. Check if store.js actually loaded.
+  if (!window.Store) {
+    showError("ERROR: store.js did not load. Check index.html to make sure the script tag is there.");
+    return;
+  }
+
   const Store = window.Store;
 
   function formatDate(ms) {
@@ -39,7 +57,7 @@
         hideUndoBanner();
         refresh();
       }).catch(function (err) {
-        alert("Could not restore: " + err);
+        showError("Could not restore: " + err);
       });
     });
 
@@ -103,7 +121,7 @@
           }
           refresh();
         }).catch(function (err) {
-          alert("Could not delete: " + err);
+          showError("Could not delete: " + err);
           del.disabled = false;
           del.textContent = "Delete";
         });
@@ -117,7 +135,7 @@
 
   function refresh() {
     Store.list().then(render).catch(function (err) {
-      alert("Could not load canvases: " + err);
+      showError("Could not load canvases: " + err);
     });
   }
 
@@ -149,7 +167,7 @@
       closeNewDialog();
       refresh();
     }).catch(function (err) {
-      alert("Could not create canvas: " + err);
+      showError("Could not create canvas: " + err);
     });
   }
 
