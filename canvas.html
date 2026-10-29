@@ -32,7 +32,7 @@
   <header id="canvas-header">
     <button id="back-btn" type="button">‹ Library</button>
     <h1 id="canvas-title">Canvas</h1>
-    <div style="width: 60px;"></div> <!-- Spacer to keep title centered -->
+    <div style="width: 60px;"></div>
   </header>
 
   <!-- AHMNI STYLE TOOLBAR -->
@@ -44,6 +44,10 @@
       <button class="tool-btn active" data-tool="pen" type="button">✎</button>
       <button class="tool-btn" data-tool="eraser" type="button">⌫</button>
     </div>
+    <div class="divider"></div>
+
+    <!-- ROTATION LOCK -->
+    <button id="rotate-lock-btn" class="tool-btn wide" type="button">ROT 🔓</button>
     <div class="divider"></div>
 
     <div class="size-group">
@@ -64,8 +68,11 @@
     </div>
   </div>
 
-  <!-- FLOATING ZOOM COUNTER -->
-  <div id="zoom-indicator">100%</div>
+  <!-- FLOATING INDICATORS -->
+  <div id="bottom-indicators">
+    <div id="zoom-indicator">100%</div>
+    <div id="rotation-indicator">0°</div>
+  </div>
 
   <div id="canvas-wrap">
     <canvas id="draw-surface"></canvas>
