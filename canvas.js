@@ -115,7 +115,6 @@
       for (let wy = startY; wy <= viewBottom; wy += spacing) {
         const s = worldToScreen(wx, wy);
         c.beginPath();
-        // Keep grid dots fixed at 1.5px on the screen
         c.arc(s.x, s.y, 1.5, 0, Math.PI * 2);
         c.fill();
       }
@@ -126,9 +125,9 @@
   function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
     
-    // CULLING: Don't draw if the line is microscopically small on screen
+    // CULLING: Don't draw if the line is smaller than 2 pixels
     const screenWidth = (stroke.width || 4) * camera.scale;
-    if (screenWidth < 0.05) return;
+    if (screenWidth < 2) return;
 
     c.save();
     c.lineCap = "round";
@@ -136,7 +135,6 @@
     c.strokeStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     c.fillStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     
-    // SCALING LAWS: Multiply line width by the zoom scale
     c.lineWidth = screenWidth;
 
     if (stroke.points.length === 1) {
@@ -197,7 +195,8 @@
           if (s.points.length > 1) {
             const screenW = (maxX - minX) * camera.scale;
             const screenH = (maxY - minY) * camera.scale;
-            if (Math.max(screenW, screenH) < 0.05) continue;
+            // If the entire stroke is smaller than 2 pixels, skip it
+            if (Math.max(screenW, screenH) < 2) continue;
           }
         }
         drawStrokeOn(bgCtx, s, s.isEraser);
@@ -456,9 +455,16 @@
 
     document.getElementById('lost-btn').addEventListener('click', centerOnContent);
     
-    document.getElementById('rotate-lock-btn').addEventListener('click', function() {
+    // UPDATED LOCK BUTTON: Toggles the blue color
+    var lockBtn = document.getElementById('rotate-lock-btn');
+    lockBtn.addEventListener('click', function() {
       rotationLocked = !rotationLocked;
       this.textContent = rotationLocked ? 'ROT 🔒' : 'ROT 🔓';
+      if (rotationLocked) {
+        this.classList.add('active');
+      } else {
+        this.classList.remove('active');
+      }
     });
   }
 
