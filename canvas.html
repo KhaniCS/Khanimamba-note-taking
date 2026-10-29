@@ -16,6 +16,8 @@
       document.body.appendChild(d);
     }
     window.showError = showError;
+    
+    // Catches missing files
     window.addEventListener('error', function(e) {
       if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
         showError("Failed to load file: " + (e.target.src || e.target.href));
@@ -23,6 +25,8 @@
         showError(e.message + " in " + (e.filename || "unknown file"));
       }
     }, true);
+
+    // Catches database/promise crashes (Restored!)
     window.addEventListener('unhandledrejection', function(e) {
       showError("Database/Async error: " + e.reason);
     });
@@ -35,9 +39,10 @@
     <div style="width: 60px;"></div>
   </header>
 
-  <!-- AHMNI STYLE TOOLBAR -->
+  <!-- UPDATED TOOLBAR -->
   <div id="toolbar">
     <button id="lost-btn" class="tool-btn wide" type="button">LOST</button>
+    <button id="add-node-btn" class="tool-btn wide" type="button" style="background:#34c759; color:#fff;">+ NODE</button>
     <div class="divider"></div>
     
     <div class="tool-group">
@@ -46,7 +51,6 @@
     </div>
     <div class="divider"></div>
 
-    <!-- ROTATION LOCK -->
     <button id="rotate-lock-btn" class="tool-btn wide" type="button">ROT 🔓</button>
     <div class="divider"></div>
 
@@ -68,7 +72,6 @@
     </div>
   </div>
 
-  <!-- FLOATING INDICATORS -->
   <div id="bottom-indicators">
     <div id="zoom-indicator">100%</div>
     <div id="rotation-indicator">0°</div>
@@ -76,6 +79,8 @@
 
   <div id="canvas-wrap">
     <canvas id="draw-surface"></canvas>
+    <!-- This layer holds the HTML text nodes -->
+    <div id="nodes-layer"></div>
   </div>
   
   <script src="store.js"></script>
