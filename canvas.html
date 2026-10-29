@@ -17,7 +17,6 @@
     }
     window.showError = showError;
     
-    // Catches missing files
     window.addEventListener('error', function(e) {
       if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
         showError("Failed to load file: " + (e.target.src || e.target.href));
@@ -26,7 +25,6 @@
       }
     }, true);
 
-    // Catches database/promise crashes (Restored!)
     window.addEventListener('unhandledrejection', function(e) {
       showError("Database/Async error: " + e.reason);
     });
@@ -39,10 +37,8 @@
     <div style="width: 60px;"></div>
   </header>
 
-  <!-- UPDATED TOOLBAR -->
   <div id="toolbar">
     <button id="lost-btn" class="tool-btn wide" type="button">LOST</button>
-    <button id="add-node-btn" class="tool-btn wide" type="button" style="background:#34c759; color:#fff;">+ NODE</button>
     <div class="divider"></div>
     
     <div class="tool-group">
@@ -79,8 +75,14 @@
 
   <div id="canvas-wrap">
     <canvas id="draw-surface"></canvas>
-    <!-- This layer holds the HTML text nodes -->
-    <div id="nodes-layer"></div>
+    
+    <!-- LIQUID GLASS SAVING POPUP -->
+    <div id="saving-overlay">
+      <div class="glass-card">
+        <div class="spinner"></div>
+        Saving...
+      </div>
+    </div>
   </div>
   
   <script src="store.js"></script>
