@@ -16,7 +16,6 @@
   let bgCtx = null;
   let bgDirty = true;
 
-  // PERFECTLY SYMMETRIC ZOOM LIMITS
   const MIN_SCALE = 0.000000001;
   const MAX_SCALE = 1000000000;
 
@@ -60,11 +59,9 @@
     const scale = camera.scale;
     let zoomText = "";
     
-    // AHMNI STYLE ZOOM COUNTER
     if (scale >= 0.01) {
       zoomText = Math.round(scale * 100) + "%";
     } else {
-      // Switch to scientific notation (e.g., 1.0e-3) for deep zoom
       zoomText = scale.toExponential(1);
     }
     document.getElementById("zoom-indicator").textContent = zoomText;
@@ -118,6 +115,7 @@
       for (let wy = startY; wy <= viewBottom; wy += spacing) {
         const s = worldToScreen(wx, wy);
         c.beginPath();
+        // Keep grid dots fixed at 1.5px on the screen
         c.arc(s.x, s.y, 1.5, 0, Math.PI * 2);
         c.fill();
       }
@@ -128,13 +126,18 @@
   function drawStrokeOn(c, stroke, isEraser) {
     if (!stroke.points || stroke.points.length === 0) return;
     
+    // CULLING: Don't draw if the line is microscopically small on screen
+    const screenWidth = (stroke.width || 4) * camera.scale;
+    if (screenWidth < 0.05) return;
+
     c.save();
     c.lineCap = "round";
     c.lineJoin = "round";
     c.strokeStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     c.fillStyle = isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     
-    c.lineWidth = stroke.width || 4;
+    // SCALING LAWS: Multiply line width by the zoom scale
+    c.lineWidth = screenWidth;
 
     if (stroke.points.length === 1) {
       const p = worldToScreen(stroke.points[0].x, stroke.points[0].y);
