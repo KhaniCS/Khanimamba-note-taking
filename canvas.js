@@ -11,7 +11,6 @@
   let canvasData = null;
   let ctx = null;
   let canvasEl = null;
-  let nodesLayer = null;
   let dpr = window.devicePixelRatio || 1;
   let bgCanvas = null;
   let bgCtx = null;
@@ -35,12 +34,13 @@
   let rotationLocked = false;
   let rotationSnapHoldUntil = 0;
 
-  let draggingNodeId = null;
-  let dragOffsetX = 0;
-  let dragOffsetY = 0;
+  // --- SAVE TIMERS ---
+  let saveTimer = null;
+  let overlayTimer = null;
+  let hideTimer = null;
+  let isSavingBlock = false;
 
-  // --- QUADTREE SPATIAL INDEX ---
-  // Chops the canvas into boxes to instantly find visible strokes
+  // --- QUADTREE ---
   class QuadTree {
     constructor(bounds, maxObjects, maxLevels, level) {
       this.bounds = bounds;
@@ -50,27 +50,23 @@
       this.objects = [];
       this.nodes = [];
     }
-
     split() {
       const nextLevel = this.level + 1;
       const w = this.bounds.w / 2;
       const h = this.bounds.h / 2;
       const x = this.bounds.x;
       const y = this.bounds.y;
-
       this.nodes[0] = new QuadTree({ x: x + w, y: y, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
       this.nodes[1] = new QuadTree({ x: x, y: y, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
       this.nodes[2] = new QuadTree({ x: x, y: y + h, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
-      this.nodes[3] = new QuadTree({ x: x, y: y + h, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
+      this.nodes[3] = new QuadTree({ x: x + w, y: y + h, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
     }
-
     getIndex(box) {
-      const index = -1;
+      let index = -1;
       const midX = this.bounds.x + this.bounds.w / 2;
       const midY = this.bounds.y + this.bounds.h / 2;
       const topQuadrant = (box.minY < midY && box.maxY < midY);
       const bottomQuadrant = (box.minY > midY);
-
       if (box.minX < midX && box.maxX < midX) {
         if (topQuadrant) index = 1;
         else if (bottomQuadrant) index = 2;
@@ -80,7 +76,6 @@
       }
       return index;
     }
-
     insert(item) {
       if (this.nodes.length) {
         const index = this.getIndex(item.bounds);
@@ -90,7 +85,6 @@
         }
       }
       this.objects.push(item);
-
       if (this.objects.length > this.maxObjects && this.level < this.maxLevels) {
         if (!this.nodes.length) this.split();
         let i = 0;
@@ -104,7 +98,6 @@
         }
       }
     }
-
     retrieve(box) {
       let returnObjects = this.objects;
       if (this.nodes.length) {
@@ -124,10 +117,8 @@
   let strokeTree = null;
 
   function rebuildQuadtree() {
-    // Create a massive root box centered around 0,0
     const treeSize = 1000000;
     strokeTree = new QuadTree({ x: -treeSize/2, y: -treeSize/2, w: treeSize, h: treeSize }, 10, 5, 0);
-    
     if (canvasData && canvasData.strokes) {
       for (let i = 0; i < canvasData.strokes.length; i++) {
         const s = canvasData.strokes[i];
@@ -148,7 +139,6 @@
     }
   }
 
-  // --- MATH & RENDER ---
   function worldToScreen(wx, wy) {
     const dx = wx - camera.x;
     const dy = wy - camera.y;
@@ -182,7 +172,6 @@
 
   function setupCanvas() {
     canvasEl = document.getElementById("draw-surface");
-    nodesLayer = document.getElementById("nodes-layer");
     ctx = canvasEl.getContext("2d");
     bgCanvas = document.createElement("canvas");
     bgCtx = bgCanvas.getContext("2d");
@@ -198,16 +187,6 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     invalidateBackground();
     redraw();
-  }
-
-  function updateNodesLayerTransform() {
-    const vw = canvasEl.clientWidth / 2;
-    const vh = canvasEl.clientHeight / 2;
-    nodesLayer.style.transform = 
-      "translate(" + vw + "px, " + vh + "px) " +
-      "rotate(" + camera.rotation + "rad) " +
-      "scale(" + camera.scale + ") " +
-      "translate(" + (-camera.x) + "px, " + (-camera.y) + "px)";
   }
 
   function drawGrid(c) {
@@ -283,15 +262,7 @@
       const w = canvasEl.clientWidth;
       const h = canvasEl.clientHeight;
       const halfDiag = Math.sqrt(w * w + h * h) / 2 / camera.scale;
-      
-      // QUERY THE QUADTREE: Only get strokes in our current viewport
-      const queryBox = {
-        minX: camera.x - halfDiag,
-        maxX: camera.x + halfDiag,
-        minY: camera.y - halfDiag,
-        maxY: camera.y + halfDiag
-      };
-      
+      const queryBox = { minX: camera.x - halfDiag, maxX: camera.x + halfDiag, minY: camera.y - halfDiag, maxY: camera.y + halfDiag };
       const visibleStrokes = strokeTree ? strokeTree.retrieve(queryBox) : canvasData.strokes;
 
       for (let i = 0; i < visibleStrokes.length; i++) {
@@ -317,60 +288,71 @@
       ctx.clearRect(0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
       ctx.drawImage(bgCanvas, 0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
       if (currentStroke) drawStrokeOn(ctx, currentStroke, currentStroke.isEraser);
-      updateNodesLayerTransform();
     });
   }
 
-  // --- NODES ---
-  function renderNodes() {
-    if (!canvasData || !canvasData.nodes) return;
-    nodesLayer.innerHTML = "";
-    
-    canvasData.nodes.forEach(function(node) {
-      const el = document.createElement("div");
-      el.className = "mind-node";
-      el.style.left = node.x + "px";
-      el.style.top = node.y + "px";
-      el.contentEditable = "true";
-      el.textContent = node.text || "Type here...";
-      el.dataset.nodeId = node.id;
+  // --- THE SEQUENTIAL SAVING MAGIC ---
+  function showSavingPopup() {
+    isSavingBlock = true;
+    const overlay = document.getElementById("saving-overlay");
+    if (overlay) overlay.classList.add("visible");
+  }
+
+  function hideSavingPopup() {
+    isSavingBlock = false;
+    const overlay = document.getElementById("saving-overlay");
+    if (overlay) overlay.classList.remove("visible");
+  }
+
+  function requestSave() {
+    if (!canvasData) return;
+    canvasData.modifiedAt = Date.now();
+    pendingSave = canvasData;
+
+    // Reset all timers on new stroke
+    if (saveTimer) clearTimeout(saveTimer);
+    if (overlayTimer) clearTimeout(overlayTimer);
+    if (hideTimer) clearTimeout(hideTimer);
+    if (isSavingBlock) hideSavingPopup();
+
+    // 4 seconds: Show Popup, block presses
+    overlayTimer = setTimeout(function() {
+      showSavingPopup();
       
-      el.addEventListener("blur", function() {
-        node.text = el.textContent;
-        requestSave();
-      });
+      // Hide popup 2 seconds later
+      hideTimer = setTimeout(function() {
+        hideSavingPopup();
+      }, 2000);
 
-      el.addEventListener("pointerdown", function(e) {
-        e.stopPropagation();
-        draggingNodeId = node.id;
-        const rect = canvasEl.getBoundingClientRect();
-        const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-        dragOffsetX = w.x - node.x;
-        dragOffsetY = w.y - node.y;
-        nodesLayer.appendChild(el);
-      });
+    }, 4000);
 
-      nodesLayer.appendChild(el);
-    });
+    // 5 seconds: Actually save the data in the background
+    saveTimer = setTimeout(function() {
+      if (!saveInFlight) flushSave();
+    }, 5000);
   }
 
-  function addNode() {
-    const center = screenToWorld(canvasEl.clientWidth / 2, canvasEl.clientHeight / 2);
-    const newNode = {
-      id: Store.uuid(),
-      x: center.x,
-      y: center.y,
-      text: ""
-    };
-    if (!canvasData.nodes) canvasData.nodes = [];
-    canvasData.nodes.push(newNode);
-    requestSave();
-    renderNodes();
+  function flushSave() {
+    if (!pendingSave) { saveInFlight = false; return; }
+    const snapshot = pendingSave;
+    pendingSave = null;
+    saveInFlight = true;
+    
+    Store.save(snapshot).then(function () {
+      if (pendingSave) {
+        flushSave();
+      } else {
+        saveInFlight = false;
+      }
+    }).catch(function (err) {
+      saveInFlight = false;
+      if (window.showError) window.showError("Could not save: " + err);
+    });
   }
 
   // --- INPUT ---
   function pointerDown(e) {
-    if (draggingNodeId) return; 
+    if (isSavingBlock) return; // Block touches when saving
     e.preventDefault();
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
@@ -417,23 +399,7 @@
   }
 
   function pointerMove(e) {
-    if (draggingNodeId) {
-      const targetNode = canvasData.nodes.find(n => n.id === draggingNodeId);
-      if (targetNode) {
-        const rect = canvasEl.getBoundingClientRect();
-        const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-        targetNode.x = w.x - dragOffsetX;
-        targetNode.y = w.y - dragOffsetY;
-        
-        const el = nodesLayer.querySelector('[data-node-id="' + draggingNodeId + '"]');
-        if (el) {
-          el.style.left = targetNode.x + "px";
-          el.style.top = targetNode.y + "px";
-        }
-      }
-      return;
-    }
-
+    if (isSavingBlock) return;
     if (e.pointerType === "touch" && isPenDrawing) return;
     if (!pointers.has(e.pointerId)) return;
     
@@ -450,13 +416,12 @@
         const ev = events[i];
         const w = screenToWorld(ev.clientX - rect.left, ev.clientY - rect.top);
         
-        // POINT DECIMATION
         if (currentStroke.points.length > 0) {
           const last = currentStroke.points[currentStroke.points.length - 1];
           const dx = (w.x - last.x) * camera.scale;
           const dy = (w.y - last.y) * camera.scale;
           const distSq = (dx * dx) + (dy * dy);
-          if (distSq < 2.25) continue; // Skip if moved less than 1.5 screen pixels
+          if (distSq < 2.25) continue;
         }
         currentStroke.points.push({ x: w.x, y: w.y });
       }
@@ -496,12 +461,7 @@
   }
 
   function pointerUp(e) {
-    if (draggingNodeId) {
-      draggingNodeId = null;
-      requestSave();
-      return;
-    }
-
+    if (isSavingBlock) return;
     if (e.pointerType === "touch" && isPenDrawing) return;
     if (!pointers.has(e.pointerId)) return;
     e.preventDefault();
@@ -514,7 +474,6 @@
     if (gesture && gesture.type === "draw" && currentStroke) {
       if (currentStroke.points.length > 0 && canvasData) {
         
-        // Calculate Bounding Box for Quadtree
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         for (let i = 0; i < currentStroke.points.length; i++) {
           if (currentStroke.points[i].x < minX) minX = currentStroke.points[i].x;
@@ -528,7 +487,9 @@
         if (strokeTree) strokeTree.insert(currentStroke);
         
         drawStrokeOn(bgCtx, currentStroke, currentStroke.isEraser);
-        requestSave();
+        
+        // Trigger the 5-second delay save
+        requestSave(); 
       }
       currentStroke = null;
       gesture = null;
@@ -544,29 +505,8 @@
     redraw();
   }
 
-  function requestSave() {
-    if (!canvasData) return;
-    canvasData.modifiedAt = Date.now();
-    pendingSave = canvasData;
-    if (!saveInFlight) flushSave();
-  }
-
-  function flushSave() {
-    if (!pendingSave) { saveInFlight = false; return; }
-    const snapshot = pendingSave;
-    pendingSave = null;
-    saveInFlight = true;
-    Store.save(snapshot).then(function () {
-      if (pendingSave) flushSave();
-      else saveInFlight = false;
-    }).catch(function (err) {
-      saveInFlight = false;
-      if (window.showError) window.showError("Could not save: " + err);
-    });
-  }
-
   function centerOnContent() {
-    if (!canvasData || (canvasData.strokes.length === 0 && canvasData.nodes.length === 0)) return;
+    if (!canvasData || canvasData.strokes.length === 0) return;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     
     canvasData.strokes.forEach(function(s) {
@@ -574,10 +514,6 @@
         if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
         if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
       });
-    });
-    (canvasData.nodes || []).forEach(function(n) {
-      if (n.x < minX) minX = n.x; if (n.y < minY) minY = n.y;
-      if (n.x > maxX) maxX = n.x; if (n.y > maxY) maxY = n.y;
     });
 
     if (isFinite(minX) && isFinite(minY)) {
@@ -620,7 +556,6 @@
       });
     });
     document.getElementById('lost-btn').addEventListener('click', centerOnContent);
-    document.getElementById('add-node-btn').addEventListener('click', addNode);
     
     var lockBtn = document.getElementById('rotate-lock-btn');
     lockBtn.addEventListener('click', function() {
@@ -655,13 +590,9 @@
     Store.get(id).then(function (data) {
       if (!data) { window.location.href = "index.html"; return; }
       canvasData = data;
-      if (!canvasData.nodes) canvasData.nodes = [];
-      
-      rebuildQuadtree(); // Build the spatial index on load
-
+      rebuildQuadtree();
       document.getElementById("canvas-title").textContent = data.title || "Untitled";
       setupEvents();
-      renderNodes();
       centerOnContent();
       updateIndicators();
       redraw();
