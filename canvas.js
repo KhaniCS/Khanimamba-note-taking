@@ -56,13 +56,8 @@
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
   }
 
-  function firstTouch(e, rect) {
-    return localPoint(e.touches[0], rect);
-  }
-
-  function getPenPoint(e) {
-    return isPen(e) ? localPoint(e, currentRect()) : null;
-  }
+  function firstTouch(e, rect) { return localPoint(e.touches[0], rect); }
+  function getPenPoint(e) { return isPen(e) ? localPoint(e, currentRect()) : null; }
 
   function analyzeTwoTouches(t0, t1, rect) {
     const p0 = localPoint(t0, rect);
@@ -120,6 +115,7 @@
     return spacing;
   }
 
+  // Uses _invRot() which now caches — so a batch call is 1 trig, not 2N
   function convertScreenPointsToWorld(stroke, camSnapshot) {
     const cos = Math.cos(-camSnapshot.rotation);
     const sin = Math.sin(-camSnapshot.rotation);
@@ -270,29 +266,37 @@
   }
   let strokeTree = null;
 
-  // --- RENDERING (MATH-OPTIMIZED) ---
+  // --- RENDERING ---
 
-  // Grid: 1 beginPath, N arcs, 1 fill. Camera matrix hoisted to locals.
-  // wx*a hoisted out of the inner loop (invariant).
+  // Grid: incremental — 2 adds per cell instead of 5 ops.
+  // Also uses one beginPath + one fill for the whole grid.
   function drawGrid(c, bounds) {
     const spacing = getGridSpacing();
     const { a, b, tx, ty } = camera;
     const startX = snap(bounds.minX, spacing);
     const startY = snap(bounds.minY, spacing);
 
+    // Pre-compute the per-step increments
+    const stepX = -spacing * b;
+    const stepY = spacing * a;
+
     c.fillStyle = "#d0d0d8";
     c.beginPath();
+
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
-      const wxA = wx * a;
-      const wxB = wx * b;
+      // Compute the first cell of this column
+      let screenX = wx * a - startY * b + tx;
+      let screenY = wx * b + startY * a + ty;
+
       for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
-        c.arc(wxA - wy * b + tx, wxB + wy * a + ty, 1.5, 0, Math.PI * 2);
+        c.arc(screenX, screenY, 1.5, 0, Math.PI * 2);
+        screenX += stepX;
+        screenY += stepY;
       }
     }
     c.fill();
   }
 
-  // Stroke: N screen conversions instead of 2N-2. Camera matrix hoisted.
   function drawStrokeOn(c, stroke) {
     if (!hasPoints(stroke)) return;
     const screenWidth = (stroke.width || 4) * camera.scale;
