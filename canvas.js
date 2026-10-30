@@ -15,6 +15,7 @@
   const CLAMP_SCALE = (v) => v < MIN_SCALE ? MIN_SCALE : v > MAX_SCALE ? MAX_SCALE : v;
   const isPen = (e) => e.pointerType === "pen" || e.pointerType === "mouse";
   const $ = (id) => document.getElementById(id);
+  const snap = (val, spacing) => Math.floor(val / spacing) * spacing;
 
   let bgCanvas, bgCtx, liveCanvas, liveCtx, toolbarEl, zoomEl, rotEl, backBtn;
 
@@ -58,6 +59,11 @@
 
   function localPoint(touch, rect) {
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  }
+
+  function getPenPoint(e) {
+    if (!isPen(e)) return null;
+    return localPoint(e, currentRect());
   }
 
   function beginPendingPan(touch, rect) {
@@ -113,7 +119,6 @@
     if (rotEl) rotEl.textContent = Math.round(rotation * 180 / Math.PI) + "°";
   }
 
-  // --- EXTRACTED HELPERS ---
   function getGridSpacing() {
     let spacing = 100;
     while (spacing * camera.scale < 30) spacing *= 2;
@@ -134,21 +139,26 @@
     }
   }
 
-  function snapRotationIfClose() {
-    if (!toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
-      camera.rotation = 0;
-      toolbar.rotationSnapHoldUntil = Date.now() + 1000;
-      camera.markDirty();
-      updateIndicators();
-      panBuffer.reset();
-      renderBackground();
-      return true;
-    }
-    return false;
+  function togglePenMode(active) {
+    isPenActive = active;
+    if (toolbarEl) toolbarEl.style.pointerEvents = active ? "none" : "auto";
+  }
+
+  function refreshUI() {
+    if (panBuffer) panBuffer.reset();
+    renderBackground();
+    updateIndicators();
+  }
+
+  function saveStroke(stroke) {
+    if (!canvasData) return;
+    stroke.bounds = strokeBounds(stroke);
+    canvasData.strokes.push(stroke);
+    if (strokeTree) strokeTree.insert(stroke);
+    autosaver.schedule(canvasData);
   }
 
   class QuadTree {
-    // 1. DEFAULT PARAMETERS (No more || 10, || 4)
     constructor(bounds, maxObjects = 10, maxLevels = 4, level = 0) {
       this.bounds = bounds; this.maxObjects = maxObjects; this.maxLevels = maxLevels; this.level = level;
       this.objects = []; this.nodes = [];
@@ -157,11 +167,8 @@
       const lvl = this.level + 1;
       const w = this.bounds.w / 2, h = this.bounds.h / 2;
       const x = this.bounds.x, y = this.bounds.y;
-      // 2. DATA TABLE FOR QUADRANT OFFSETS
       const offsets = [[w, 0], [0, 0], [0, h], [w, h]];
-      this.nodes = offsets.map(([dx, dy]) =>
-        new QuadTree({ x: x + dx, y: y + dy, w, h }, this.maxObjects, this.maxLevels, lvl)
-      );
+      this.nodes = offsets.map(([dx, dy]) => new QuadTree({ x: x + dx, y: y + dy, w, h }, this.maxObjects, this.maxLevels, lvl));
     }
     getIndex(box) {
       const midX = this.bounds.x + this.bounds.w / 2;
@@ -201,10 +208,10 @@
   let strokeTree = null;
 
   function drawGrid(c, w, h, cx, cy) {
-    const spacing = getGridSpacing(); // EXTRACTED
+    const spacing = getGridSpacing();
     const bounds = camera.getVisibleBounds(w, h, cx, cy);
-    const startX = Math.floor(bounds.minX / spacing) * spacing;
-    const startY = Math.floor(bounds.minY / spacing) * spacing;
+    const startX = snap(bounds.minX, spacing);
+    const startY = snap(bounds.minY, spacing);
 
     c.fillStyle = "#d0d0d8";
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
@@ -216,8 +223,7 @@
   }
 
   function drawStrokeOn(c, stroke) {
-    if (!stroke.points || stroke.points.length === 0) return;
-    if ((stroke.width || 4) * camera.scale < 0.1) return;
+    if (!stroke.points || stroke.points.length === 0 || (stroke.width || 4) * camera.scale < 0.1) return;
 
     applyPenStyle(c, stroke);
     const pts = stroke.points;
@@ -279,12 +285,12 @@
   }
 
   function penDown(e) {
-    if (!isPen(e)) return;
-    e.preventDefault();
-    isPenActive = true;
-    if (toolbarEl) toolbarEl.style.pointerEvents = "none";
+    const p = getPenPoint(e);
+    if (!p) return;
 
-    const p = localPoint(e, currentRect());
+    e.preventDefault();
+    togglePenMode(true);
+
     strokeOriginCamera = { x: camera.x, y: camera.y, scale: camera.scale, rotation: camera.rotation };
     currentStroke = {
       id: Store.uuid(), points: [], color: toolbar.currentColor,
@@ -296,9 +302,9 @@
   }
 
   function penMove(e) {
-    if (!isPen(e) || !currentStroke || screenCount >= MAX_POINTS) return;
+    const p = getPenPoint(e);
+    if (!p || !currentStroke || screenCount >= MAX_POINTS) return;
 
-    const p = localPoint(e, currentRect());
     const dx = p.x - screenX[screenCount - 1];
     const dy = p.y - screenY[screenCount - 1];
     if (dx * dx + dy * dy < 2.25) return;
@@ -309,19 +315,11 @@
 
   function penUp(e) {
     if (!isPen(e)) return;
-    isPenActive = false;
-    if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
+    togglePenMode(false);
 
     if (currentStroke && screenCount > 0) {
-      // EXTRACTED
       convertScreenPointsToWorld(currentStroke, strokeOriginCamera);
-
-      if (canvasData) {
-        currentStroke.bounds = strokeBounds(currentStroke);
-        canvasData.strokes.push(currentStroke);
-        if (strokeTree) strokeTree.insert(currentStroke);
-        autosaver.schedule(canvasData);
-      }
+      saveStroke(currentStroke);
       currentStroke = null;
       renderBackground();
       redrawLive();
@@ -390,9 +388,11 @@
     if (isPenActive || !touchCtx.gesture) return;
 
     if (e.touches.length === 0) {
-      // EXTRACTED SNAP LOGIC
-      if (touchCtx.gesture.type === "pinch") {
-        snapRotationIfClose();
+      if (touchCtx.gesture.type === "pinch" && !toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+        camera.rotation = 0;
+        toolbar.rotationSnapHoldUntil = Date.now() + 1000;
+        camera.markDirty();
+        refreshUI();
       }
       touchCtx.gesture = null;
     } else if (e.touches.length === 1 && touchCtx.gesture.type === "pinch") {
@@ -449,11 +449,11 @@
       canvasData = data;
       if (!canvasData.strokes) canvasData.strokes = [];
       const S = 1000000;
-      strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S }); // defaults applied here
+      strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S });
       for (const s of canvasData.strokes) if (s.points.length > 0 && s.bounds) strokeTree.insert(s);
       $("canvas-title").textContent = data.title || "Untitled";
       centerOnContent();
-      updateIndicators();
+      refreshUI();
       resize();
     }).catch((err) => window.showError("Database error: " + err, "red"));
   }
@@ -472,9 +472,7 @@
       0
     );
 
-    if (panBuffer) panBuffer.reset();
-    renderBackground();
-    updateIndicators();
+    refreshUI();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
