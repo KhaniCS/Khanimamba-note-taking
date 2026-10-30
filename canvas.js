@@ -36,10 +36,6 @@
   let halfW = 0;
   let halfH = 0;
 
-  const _ptA = { x: 0, y: 0 };
-  const _ptB = { x: 0, y: 0 };
-  const _ptC = { x: 0, y: 0 };
-
   function emptyBounds() { return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; }
   function extendBounds(b, x, y) {
     b.minX = Math.min(b.minX, x); b.maxX = Math.max(b.maxX, x);
@@ -52,12 +48,6 @@
     return a;
   }
 
-  function projectToScreen(wx, wy, out) {
-    const { a, b, tx, ty } = camera;
-    out.x = wx * a - wy * b + tx;
-    out.y = wx * b + wy * a + ty;
-  }
-
   const currentRect = () => liveCanvas.getBoundingClientRect();
   const liveSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
   const bgSize = () => ({ w: bgCanvas.width / DPR(), h: bgCanvas.height / DPR() });
@@ -66,7 +56,6 @@
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
   }
 
-  // NEW: replaces 5× localPoint(e.touches[0], ...)
   function firstTouch(e, rect) {
     return localPoint(e.touches[0], rect);
   }
@@ -87,13 +76,13 @@
     };
   }
 
-  function applyPenStyle(ctx, stroke) {
+  function applyPenStyle(ctx, stroke, screenWidth) {
     const color = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = strokeScreenWidth(stroke);
+    ctx.lineWidth = screenWidth;
   }
 
   function pushPoint(x, y) {
@@ -104,7 +93,6 @@
     return true;
   }
 
-  // CHANGED: DPR() once, not 4×
   function resizeLayer(canvas, context, w, h, factor) {
     const dpr = DPR();
     canvas.width = w * factor * dpr;
@@ -171,13 +159,11 @@
     }
   }
 
-  // NEW: replaces 2× "if 1 touch, transition back to pending_pan, else null"
   function continueAsPendingPanIfOneTouch(e) {
     if (e.touches.length !== 1) return null;
     return Gesture.pending_pan.start(firstTouch(e, currentRect()));
   }
 
-  // --- GESTURE STATE MACHINE ---
   const Gesture = {
     pending_pan: {
       start(p) { return { type: "pending_pan", startX: p.x, startY: p.y }; },
@@ -192,16 +178,13 @@
       start(p) { return { type: "pan", lastX: p.x, lastY: p.y }; },
       move(g, e, rect) {
         const p = firstTouch(e, rect);
-        // CHANGED: dx/dy computed once, passed twice
         const dx = p.x - g.lastX;
         const dy = p.y - g.lastY;
         flushPanBuffer(dx, dy);
         camera.pan(dx, dy);
         return Gesture.pan.start(p);
       },
-      end(g, e) {
-        return continueAsPendingPanIfOneTouch(e);
-      }
+      end(g, e) { return continueAsPendingPanIfOneTouch(e); }
     },
     pinch: {
       start(t0, t1, rect) {
@@ -237,7 +220,6 @@
     }
   };
 
-  // --- QUADTREE ---
   class QuadTree {
     constructor(bounds, maxObjects = 10, maxLevels = 4, level = 0) {
       this.bounds = bounds; this.maxObjects = maxObjects; this.maxLevels = maxLevels; this.level = level;
@@ -288,43 +270,63 @@
   }
   let strokeTree = null;
 
-  // --- RENDERING ---
+  // --- RENDERING (MATH-OPTIMIZED) ---
+
+  // Grid: 1 beginPath, N arcs, 1 fill. Camera matrix hoisted to locals.
+  // wx*a hoisted out of the inner loop (invariant).
   function drawGrid(c, bounds) {
     const spacing = getGridSpacing();
+    const { a, b, tx, ty } = camera;
+    const startX = snap(bounds.minX, spacing);
+    const startY = snap(bounds.minY, spacing);
+
     c.fillStyle = "#d0d0d8";
-    for (let wx = snap(bounds.minX, spacing); wx <= bounds.maxX; wx += spacing) {
-      for (let wy = snap(bounds.minY, spacing); wy <= bounds.maxY; wy += spacing) {
-        projectToScreen(wx, wy, _ptA);
-        c.beginPath(); c.arc(_ptA.x, _ptA.y, 1.5, 0, Math.PI * 2); c.fill();
+    c.beginPath();
+    for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
+      const wxA = wx * a;
+      const wxB = wx * b;
+      for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
+        c.arc(wxA - wy * b + tx, wxB + wy * a + ty, 1.5, 0, Math.PI * 2);
       }
     }
+    c.fill();
   }
 
+  // Stroke: N screen conversions instead of 2N-2. Camera matrix hoisted.
   function drawStrokeOn(c, stroke) {
     if (!hasPoints(stroke)) return;
-    if (strokeScreenWidth(stroke) < 0.1) return;
+    const screenWidth = (stroke.width || 4) * camera.scale;
+    if (screenWidth < 0.1) return;
 
-    applyPenStyle(c, stroke);
+    applyPenStyle(c, stroke, screenWidth);
     const pts = stroke.points;
+    const { a, b, tx, ty } = camera;
+
+    let prevX = pts[0].x * a - pts[0].y * b + tx;
+    let prevY = pts[0].x * b + pts[0].y * a + ty;
 
     if (pts.length === 1) {
-      projectToScreen(pts[0].x, pts[0].y, _ptA);
-      c.beginPath(); c.arc(_ptA.x, _ptA.y, c.lineWidth / 2, 0, Math.PI * 2); c.fill();
+      c.beginPath();
+      c.arc(prevX, prevY, screenWidth / 2, 0, Math.PI * 2);
+      c.fill();
       return;
     }
 
-    projectToScreen(pts[0].x, pts[0].y, _ptA);
     c.beginPath();
-    c.moveTo(_ptA.x, _ptA.y);
+    c.moveTo(prevX, prevY);
+
+    let curX = pts[1].x * a - pts[1].y * b + tx;
+    let curY = pts[1].x * b + pts[1].y * a + ty;
 
     for (let i = 1; i < pts.length - 1; i++) {
-      projectToScreen(pts[i].x, pts[i].y, _ptB);
-      projectToScreen(pts[i + 1].x, pts[i + 1].y, _ptC);
-      c.quadraticCurveTo(_ptB.x, _ptB.y, (_ptB.x + _ptC.x) / 2, (_ptB.y + _ptC.y) / 2);
+      const nextX = pts[i + 1].x * a - pts[i + 1].y * b + tx;
+      const nextY = pts[i + 1].x * b + pts[i + 1].y * a + ty;
+      c.quadraticCurveTo(curX, curY, (curX + nextX) / 2, (curY + nextY) / 2);
+      curX = nextX;
+      curY = nextY;
     }
 
-    projectToScreen(pts[pts.length - 1].x, pts[pts.length - 1].y, _ptA);
-    c.lineTo(_ptA.x, _ptA.y);
+    c.lineTo(curX, curY);
     c.stroke();
   }
 
@@ -353,7 +355,7 @@
       liveCtx.clearRect(0, 0, w, h);
       if (!currentStroke || screenCount === 0) return;
 
-      applyPenStyle(liveCtx, currentStroke);
+      applyPenStyle(liveCtx, currentStroke, strokeScreenWidth(currentStroke));
       liveCtx.beginPath();
       for (let i = 0; i < screenCount; i++) {
         if (i === 0) liveCtx.moveTo(screenX[i], screenY[i]);
@@ -363,7 +365,6 @@
     });
   }
 
-  // --- PEN HANDLERS ---
   function penDown(e) {
     const p = getPenPoint(e);
     if (!p) return;
@@ -406,10 +407,8 @@
     }
   }
 
-  // --- TOUCH DISPATCH ---
   const touchCtx = { gesture: null };
 
-  // CHANGED: single guard. preventDefault moved here so touchMove has no guard.
   function dispatchGesture(phase, e) {
     if (isPenActive || !touchCtx.gesture) return;
     if (phase === "move") e.preventDefault();
@@ -428,15 +427,9 @@
     }
   }
 
-  function touchMove(e) {
-    dispatchGesture("move", e);
-  }
+  function touchMove(e) { dispatchGesture("move", e); }
+  function touchEnd(e) { dispatchGesture("end", e); }
 
-  function touchEnd(e) {
-    dispatchGesture("end", e);
-  }
-
-  // --- INIT ---
   function init() {
     ([bgCanvas, liveCanvas, toolbarEl, zoomEl, rotEl, backBtn] =
       ["bg-surface", "draw-surface", "toolbar", "zoom-indicator", "rotation-indicator", "back-btn"].map($));
