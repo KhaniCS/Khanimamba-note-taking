@@ -36,7 +36,6 @@
   const _ptB = { x: 0, y: 0 };
   const _ptC = { x: 0, y: 0 };
 
-  // --- BOUNDS HELPERS (the last real repetition) ---
   function emptyBounds() { return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; }
   function extendBounds(b, x, y) {
     b.minX = Math.min(b.minX, x); b.maxX = Math.max(b.maxX, x);
@@ -101,7 +100,6 @@
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  // SIMPLIFIED with extendBounds
   function strokeBounds(stroke) {
     if (!stroke || !stroke.points || stroke.points.length === 0) return null;
     const b = emptyBounds();
@@ -115,21 +113,55 @@
     if (rotEl) rotEl.textContent = Math.round(rotation * 180 / Math.PI) + "°";
   }
 
+  // --- EXTRACTED HELPERS ---
+  function getGridSpacing() {
+    let spacing = 100;
+    while (spacing * camera.scale < 30) spacing *= 2;
+    while (spacing * camera.scale > 60) spacing /= 2;
+    return spacing;
+  }
+
+  function convertScreenPointsToWorld(stroke, camSnapshot) {
+    const cos = Math.cos(-camSnapshot.rotation);
+    const sin = Math.sin(-camSnapshot.rotation);
+    for (let i = 0; i < screenCount; i++) {
+      const px = screenX[i] - halfW;
+      const py = screenY[i] - halfH;
+      stroke.points.push({
+        x: (px * cos - py * sin) / camSnapshot.scale + camSnapshot.x,
+        y: (px * sin + py * cos) / camSnapshot.scale + camSnapshot.y
+      });
+    }
+  }
+
+  function snapRotationIfClose() {
+    if (!toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+      camera.rotation = 0;
+      toolbar.rotationSnapHoldUntil = Date.now() + 1000;
+      camera.markDirty();
+      updateIndicators();
+      panBuffer.reset();
+      renderBackground();
+      return true;
+    }
+    return false;
+  }
+
   class QuadTree {
-    constructor(bounds, maxObjects, maxLevels, level) {
-      this.bounds = bounds; this.maxObjects = maxObjects || 10; this.maxLevels = maxLevels || 4; this.level = level || 0;
+    // 1. DEFAULT PARAMETERS (No more || 10, || 4)
+    constructor(bounds, maxObjects = 10, maxLevels = 4, level = 0) {
+      this.bounds = bounds; this.maxObjects = maxObjects; this.maxLevels = maxLevels; this.level = level;
       this.objects = []; this.nodes = [];
     }
     split() {
       const lvl = this.level + 1;
       const w = this.bounds.w / 2, h = this.bounds.h / 2;
       const x = this.bounds.x, y = this.bounds.y;
-      this.nodes = [
-        new QuadTree({ x: x + w, y: y, w, h }, this.maxObjects, this.maxLevels, lvl),
-        new QuadTree({ x: x, y: y, w, h }, this.maxObjects, this.maxLevels, lvl),
-        new QuadTree({ x: x, y: y + h, w, h }, this.maxObjects, this.maxLevels, lvl),
-        new QuadTree({ x: x + w, y: y + h, w, h }, this.maxObjects, this.maxLevels, lvl)
-      ];
+      // 2. DATA TABLE FOR QUADRANT OFFSETS
+      const offsets = [[w, 0], [0, 0], [0, h], [w, h]];
+      this.nodes = offsets.map(([dx, dy]) =>
+        new QuadTree({ x: x + dx, y: y + dy, w, h }, this.maxObjects, this.maxLevels, lvl)
+      );
     }
     getIndex(box) {
       const midX = this.bounds.x + this.bounds.w / 2;
@@ -169,10 +201,7 @@
   let strokeTree = null;
 
   function drawGrid(c, w, h, cx, cy) {
-    let spacing = 100;
-    while (spacing * camera.scale < 30) spacing *= 2;
-    while (spacing * camera.scale > 60) spacing /= 2;
-
+    const spacing = getGridSpacing(); // EXTRACTED
     const bounds = camera.getVisibleBounds(w, h, cx, cy);
     const startX = Math.floor(bounds.minX / spacing) * spacing;
     const startY = Math.floor(bounds.minY / spacing) * spacing;
@@ -284,18 +313,8 @@
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
     if (currentStroke && screenCount > 0) {
-      const c = strokeOriginCamera;
-      const cos = Math.cos(-c.rotation);
-      const sin = Math.sin(-c.rotation);
-
-      for (let i = 0; i < screenCount; i++) {
-        const px = screenX[i] - halfW;
-        const py = screenY[i] - halfH;
-        currentStroke.points.push({
-          x: (px * cos - py * sin) / c.scale + c.x,
-          y: (px * sin + py * cos) / c.scale + c.y
-        });
-      }
+      // EXTRACTED
+      convertScreenPointsToWorld(currentStroke, strokeOriginCamera);
 
       if (canvasData) {
         currentStroke.bounds = strokeBounds(currentStroke);
@@ -371,14 +390,9 @@
     if (isPenActive || !touchCtx.gesture) return;
 
     if (e.touches.length === 0) {
-      const g = touchCtx.gesture;
-      if (g.type === "pinch" && !toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
-        camera.rotation = 0;
-        toolbar.rotationSnapHoldUntil = Date.now() + 1000;
-        camera.markDirty();
-        updateIndicators();
-        panBuffer.reset();
-        renderBackground();
+      // EXTRACTED SNAP LOGIC
+      if (touchCtx.gesture.type === "pinch") {
+        snapRotationIfClose();
       }
       touchCtx.gesture = null;
     } else if (e.touches.length === 1 && touchCtx.gesture.type === "pinch") {
@@ -435,7 +449,7 @@
       canvasData = data;
       if (!canvasData.strokes) canvasData.strokes = [];
       const S = 1000000;
-      strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S }, 10, 5, 0);
+      strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S }); // defaults applied here
       for (const s of canvasData.strokes) if (s.points.length > 0 && s.bounds) strokeTree.insert(s);
       $("canvas-title").textContent = data.title || "Untitled";
       centerOnContent();
@@ -444,7 +458,6 @@
     }).catch((err) => window.showError("Database error: " + err, "red"));
   }
 
-  // SIMPLIFIED with mergeBounds
   function centerOnContent() {
     if (!canvasData || canvasData.strokes.length === 0) return;
 
