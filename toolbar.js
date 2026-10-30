@@ -12,47 +12,36 @@
     }
 
     wire(onCenter, onToggleRotation, onToggleZoom) {
-      document.querySelectorAll('.tool-btn[data-tool]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          this.currentTool = btn.getAttribute('data-tool');
+      // 1. Collapse the 3 button groups into one helper
+      const wireGroup = (selector, applyValue) => {
+        document.querySelectorAll(selector).forEach((btn) => {
+          btn.addEventListener('click', () => {
+            document.querySelectorAll(selector).forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            applyValue(btn);
+          });
         });
-      });
+      };
 
-      document.querySelectorAll('.size-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          this.currentSize = parseInt(btn.getAttribute('data-size'), 10);
-        });
-      });
-
-      document.querySelectorAll('.color-btn').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
-          btn.classList.add('active');
-          this.currentColor = btn.getAttribute('data-color');
-        });
-      });
+      wireGroup('.tool-btn[data-tool]', btn => { this.currentTool = btn.getAttribute('data-tool'); });
+      wireGroup('.size-btn', btn => { this.currentSize = parseInt(btn.getAttribute('data-size'), 10); });
+      wireGroup('.color-btn', btn => { this.currentColor = btn.getAttribute('data-color'); });
 
       document.getElementById('lost-btn').addEventListener('click', onCenter);
 
-      const rotBtn = document.getElementById('rotate-lock-btn');
-      rotBtn.addEventListener('click', () => {
-        this.rotationLocked = !this.rotationLocked;
-        rotBtn.textContent = this.rotationLocked ? 'ROT 🔒' : 'ROT 🔓';
-        rotBtn.classList.toggle('active', this.rotationLocked);
-        onToggleRotation();
-      });
+      // 2. Collapse the 2 lock toggles into one helper
+      const wireToggle = (id, activeKey, labelOn, labelOff, onToggle) => {
+        const btn = document.getElementById(id);
+        btn.addEventListener('click', () => {
+          this[activeKey] = !this[activeKey];
+          btn.textContent = this[activeKey] ? labelOn : labelOff;
+          btn.classList.toggle('active', this[activeKey]);
+          if (onToggle) onToggle();
+        });
+      };
 
-      const zoomBtn = document.getElementById('zoom-lock-btn');
-      zoomBtn.addEventListener('click', () => {
-        this.zoomLocked = !this.zoomLocked;
-        zoomBtn.textContent = this.zoomLocked ? 'ZOOM 🔒' : 'ZOOM 🔓';
-        zoomBtn.classList.toggle('active', this.zoomLocked);
-        onToggleZoom();
-      });
+      wireToggle('rotate-lock-btn', 'rotationLocked', 'ROT 🔒', 'ROT 🔓', onToggleRotation);
+      wireToggle('zoom-lock-btn', 'zoomLocked', 'ZOOM 🔒', 'ZOOM 🔓', onToggleZoom);
     }
   }
 
