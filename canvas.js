@@ -21,7 +21,6 @@
   const strokeScreenWidth = (stroke) => (stroke.width || 4) * camera.scale;
 
   let bgCanvas, bgCtx, liveCanvas, liveCtx, toolbarEl, zoomEl, rotEl, backBtn;
-
   let panBuffer = null;
   let canvasData = null;
   let currentStroke = null;
@@ -33,17 +32,19 @@
   const screenY = new Float32Array(MAX_POINTS);
   let screenCount = 0;
 
-  // NEW: how many points are already painted on the live canvas
+  // How many points are already painted on the live canvas
   let liveDrawnCount = 0;
 
   let halfW = 0;
   let halfH = 0;
 
   function emptyBounds() { return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; }
+
   function extendBounds(b, x, y) {
     b.minX = Math.min(b.minX, x); b.maxX = Math.max(b.maxX, x);
     b.minY = Math.min(b.minY, y); b.maxY = Math.max(b.maxY, y);
   }
+
   function mergeBounds(a, b) {
     if (!b) return a;
     a.minX = Math.min(a.minX, b.minX); a.maxX = Math.max(a.maxX, b.maxX);
@@ -60,6 +61,7 @@
   }
 
   function firstTouch(e, rect) { return localPoint(e.touches[0], rect); }
+
   function getPenPoint(e) { return isPen(e) ? localPoint(e, currentRect()) : null; }
 
   function analyzeTwoTouches(t0, t1, rect) {
@@ -172,6 +174,7 @@
       },
       end() { return null; }
     },
+
     pan: {
       start(p) { return { type: "pan", lastX: p.x, lastY: p.y }; },
       move(g, e, rect) {
@@ -184,6 +187,7 @@
       },
       end(g, e) { return continueAsPendingPanIfOneTouch(e); }
     },
+
     pinch: {
       start(t0, t1, rect) {
         const a = analyzeTwoTouches(t0, t1, rect);
@@ -223,6 +227,7 @@
       this.bounds = bounds; this.maxObjects = maxObjects; this.maxLevels = maxLevels; this.level = level;
       this.objects = []; this.nodes = [];
     }
+
     split() {
       const lvl = this.level + 1;
       const w = this.bounds.w / 2, h = this.bounds.h / 2;
@@ -231,6 +236,7 @@
         new QuadTree({ x: x + dx, y: y + dy, w, h }, this.maxObjects, this.maxLevels, lvl)
       );
     }
+
     getIndex(box) {
       const midX = this.bounds.x + this.bounds.w / 2;
       const midY = this.bounds.y + this.bounds.h / 2;
@@ -240,6 +246,7 @@
       if (box.minX > midX) return top ? 0 : bottom ? 3 : -1;
       return -1;
     }
+
     insert(item) {
       if (this.nodes.length) {
         const idx = this.getIndex(item.bounds);
@@ -256,6 +263,7 @@
         }
       }
     }
+
     retrieve(box) {
       let out = this.objects;
       if (this.nodes.length) {
@@ -266,6 +274,7 @@
       return out;
     }
   }
+
   let strokeTree = null;
 
   function drawGrid(c, bounds) {
@@ -273,30 +282,37 @@
     const { a, b, tx, ty } = camera;
     const startX = snap(bounds.minX, spacing);
     const startY = snap(bounds.minY, spacing);
-
     const stepX = -spacing * b;
     const stepY = spacing * a;
 
     c.fillStyle = "#d0d0d8";
     c.beginPath();
+
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
       let sx = wx * a - startY * b + tx;
       let sy = wx * b + startY * a + ty;
+
       for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
+        // FIX: start each dot as its own sub-path. Without this moveTo, canvas
+        // joins consecutive arcs with straight lines and fill() paints grey wedges.
+        c.moveTo(sx + 1.5, sy);
         c.arc(sx, sy, 1.5, 0, Math.PI * 2);
         sx += stepX;
         sy += stepY;
       }
     }
+
     c.fill();
   }
 
   function drawStrokeOn(c, stroke) {
     if (!hasPoints(stroke)) return;
+
     const screenWidth = (stroke.width || 4) * camera.scale;
     if (screenWidth < 0.1) return;
 
     applyPenStyle(c, stroke, screenWidth);
+
     const pts = stroke.points;
     const { a, b, tx, ty } = camera;
 
@@ -331,7 +347,9 @@
   function renderBackground() {
     const { w, h } = bgSize();
     const cx = w / 2, cy = h / 2;
+
     camera.updateMatrix(cx, cy);
+
     const bounds = camera.getVisibleBounds(w, h, cx, cy);
 
     bgCtx.clearRect(0, 0, w, h);
@@ -345,9 +363,11 @@
 
   // --- INCREMENTAL LIVE DRAW (the ink speed fix) ---
   let liveDrawScheduled = false;
+
   function scheduleIncrementalLiveDraw() {
     if (liveDrawScheduled) return;
     liveDrawScheduled = true;
+
     requestAnimationFrame(() => {
       liveDrawScheduled = false;
       if (!currentStroke || liveDrawnCount >= screenCount) return;
@@ -359,6 +379,7 @@
         liveCtx.lineTo(screenX[i], screenY[i]);
       }
       liveCtx.stroke();
+
       liveDrawnCount = screenCount;
     });
   }
@@ -378,6 +399,7 @@
     togglePenMode(true);
 
     strokeOriginCamera = { x: camera.x, y: camera.y, scale: camera.scale, rotation: camera.rotation };
+
     currentStroke = {
       id: Store.uuid(), points: [], color: toolbar.currentColor,
       width: toolbar.currentSize / camera.scale, isEraser: toolbar.currentTool === "eraser", originScale: camera.scale
@@ -425,8 +447,10 @@
   function dispatchGesture(phase, e) {
     if (isPenActive || !touchCtx.gesture) return;
     if (phase === "move") e.preventDefault();
+
     const handler = Gesture[touchCtx.gesture.type];
     if (!handler || !handler[phase]) return;
+
     touchCtx.gesture = handler[phase](touchCtx.gesture, e, currentRect());
   }
 
@@ -465,6 +489,7 @@
     }
 
     window.addEventListener("resize", resize);
+
     toolbar.wire(centerOnContent, () => camera.markDirty(), () => {});
 
     backBtn.addEventListener("click", () => {
@@ -491,13 +516,23 @@
     Store.get(id).then((data) => {
       canvasData = data;
       if (!canvasData.strokes) canvasData.strokes = [];
+
       const S = 1000000;
-      strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S });
-      for (const s of canvasData.strokes) if (hasPoints(s) && s.bounds) strokeTree.insert(s);
+      strokeTree = new QuadTree({ x: -S / 2, y: -S / 2, w: S, h: S });
+
+      // FIX: rebuild missing bounds so older strokes are still drawn
+      for (const s of canvasData.strokes) {
+        if (!hasPoints(s)) continue;
+        if (!s.bounds) s.bounds = strokeBounds(s);
+        strokeTree.insert(s);
+      }
+
       $("canvas-title").textContent = data.title || "Untitled";
-      centerOnContent();
-      refreshUI();
+
+      // FIX: size the layers first (sets halfW/halfH and creates the pan buffer),
+      // then centre the view. centerOnContent() already calls refreshUI().
       resize();
+      centerOnContent();
     }).catch((err) => window.showError("Database error: " + err, "red"));
   }
 
@@ -506,8 +541,8 @@
 
     const agg = emptyBounds();
     for (const s of canvasData.strokes) mergeBounds(agg, strokeBounds(s));
-
     if (!isFinite(agg.minX)) return;
+
     camera.setPosition(
       (agg.minX + agg.maxX) / 2,
       (agg.minY + agg.maxY) / 2,
