@@ -31,13 +31,17 @@
   let rotationSnapHoldUntil = 0;
   let zoomLocked = false;
 
-  // --- THE STATE FLAG (Replaces DOM listener churn) ---
+  // --- THE STATE FLAG ---
   let isPenActive = false;
 
   // --- TYPED ARRAYS (Zero Object Allocation) ---
   const MAX_SCREEN_POINTS = 50000;
   const screenPoints = new Float32Array(MAX_SCREEN_POINTS * 2);
   let screenPointCount = 0;
+
+  // --- FRAME TRANSFORM CACHE (Zero GC in render loop) ---
+  const frameTransform = { cos: 1, sin: 1, cx: 0, cy: 0, scale: 1, camX: 0, camY: 0 };
+  const viewportBounds = { minX: 0, maxX: 0, minY: 0, maxY: 0 };
 
   let saveTimer = null;
   let strokeOriginCamera = null;
@@ -141,15 +145,14 @@
     }
   }
 
-  function worldToScreen(wx, wy) {
-    const dx = wx - camera.x;
-    const dy = wy - camera.y;
-    const cos = Math.cos(camera.rotation);
-    const sin = Math.sin(camera.rotation);
-    return {
-      x: (dx * cos - dy * sin) * camera.scale + canvasEl.clientWidth / 2,
-      y: (dx * sin + dy * cos) * camera.scale + canvasEl.clientHeight / 2
-    };
+  function updateFrameTransform() {
+    frameTransform.cos = Math.cos(camera.rotation);
+    frameTransform.sin = Math.sin(camera.rotation);
+    frameTransform.cx = canvasEl.clientWidth / 2;
+    frameTransform.cy = canvasEl.clientHeight / 2;
+    frameTransform.scale = camera.scale;
+    frameTransform.camX = camera.x;
+    frameTransform.camY = camera.y;
   }
 
   function screenToWorld(sx, sy) {
@@ -187,6 +190,42 @@
     redraw();
   }
 
+  function getViewportAABB() {
+    const w = canvasEl.clientWidth;
+    const h = canvasEl.clientHeight;
+    
+    const cos = Math.cos(-camera.rotation);
+    const sin = Math.sin(-camera.rotation);
+    
+    // Top Left (0, 0)
+    let px = -w / 2;
+    let py = -h / 2;
+    let x1 = (px * cos - py * sin) / camera.scale + camera.x;
+    let y1 = (px * sin + py * cos) / camera.scale + camera.y;
+    
+    // Top Right (w, 0)
+    px = w / 2; py = -h / 2;
+    let x2 = (px * cos - py * sin) / camera.scale + camera.x;
+    let y2 = (px * sin + py * cos) / camera.scale + camera.y;
+    
+    // Bottom Left (0, h)
+    px = -w / 2; py = h / 2;
+    let x3 = (px * cos - py * sin) / camera.scale + camera.x;
+    let y3 = (px * sin + py * cos) / camera.scale + camera.y;
+    
+    // Bottom Right (w, h)
+    px = w / 2; py = h / 2;
+    let x4 = (px * cos - py * sin) / camera.scale + camera.x;
+    let y4 = (px * sin + py * cos) / camera.scale + camera.y;
+    
+    viewportBounds.minX = Math.min(x1, x2, x3, x4);
+    viewportBounds.maxX = Math.max(x1, x2, x3, x4);
+    viewportBounds.minY = Math.min(y1, y2, y3, y4);
+    viewportBounds.maxY = Math.max(y1, y2, y3, y4);
+    
+    return viewportBounds;
+  }
+
   function drawGrid(c) {
     const w = canvasEl.clientWidth;
     const h = canvasEl.clientHeight;
@@ -197,16 +236,21 @@
     c.save();
     c.fillStyle = "#d0d0d8";
     
-    // Get AABB for grid rendering too
     const bounds = getViewportAABB();
     const startX = Math.floor(bounds.minX / spacing) * spacing;
     const startY = Math.floor(bounds.minY / spacing) * spacing;
     
+    const t = frameTransform;
+    
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
       for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
-        const s = worldToScreen(wx, wy);
+        const dx = wx - t.camX;
+        const dy = wy - t.camY;
+        const sx = (dx * t.cos - dy * t.sin) * t.scale + t.cx;
+        const sy = (dx * t.sin + dy * t.cos) * t.scale + t.cy;
+        
         c.beginPath();
-        c.arc(s.x, s.y, 1.5, 0, Math.PI * 2);
+        c.arc(sx, sy, 1.5, 0, Math.PI * 2);
         c.fill();
       }
     }
@@ -225,44 +269,52 @@
     c.fillStyle = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     c.lineWidth = screenWidth;
 
+    const t = frameTransform;
+
     if (stroke.points.length === 1) {
-      const p = worldToScreen(stroke.points[0].x, stroke.points[0].y);
+      const dx = stroke.points[0].x - t.camX;
+      const dy = stroke.points[0].y - t.camY;
+      const sx = (dx * t.cos - dy * t.sin) * t.scale + t.cx;
+      const sy = (dx * t.sin + dy * t.cos) * t.scale + t.cy;
+      
       c.beginPath();
-      c.arc(p.x, p.y, c.lineWidth / 2, 0, Math.PI * 2);
+      c.arc(sx, sy, c.lineWidth / 2, 0, Math.PI * 2);
       c.fill();
     } else {
       c.beginPath();
-      const p0 = worldToScreen(stroke.points[0].x, stroke.points[0].y);
-      c.moveTo(p0.x, p0.y);
+      
+      let dx = stroke.points[0].x - t.camX;
+      let dy = stroke.points[0].y - t.camY;
+      let sx = (dx * t.cos - dy * t.sin) * t.scale + t.cx;
+      let sy = (dx * t.sin + dy * t.cos) * t.scale + t.cy;
+      c.moveTo(sx, sy);
+
       for (let i = 1; i < stroke.points.length - 1; i++) {
-        const p1 = worldToScreen(stroke.points[i].x, stroke.points[i].y);
-        const p2 = worldToScreen(stroke.points[i + 1].x, stroke.points[i + 1].y);
-        c.quadraticCurveTo(p1.x, p1.y, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
+        dx = stroke.points[i].x - t.camX;
+        dy = stroke.points[i].y - t.camY;
+        const p1x = (dx * t.cos - dy * t.sin) * t.scale + t.cx;
+        const p1y = (dx * t.sin + dy * t.cos) * t.scale + t.cy;
+
+        dx = stroke.points[i + 1].x - t.camX;
+        dy = stroke.points[i + 1].y - t.camY;
+        const p2x = (dx * t.cos - dy * t.sin) * t.scale + t.cx;
+        const p2y = (dx * t.sin + dy * t.cos) * t.scale + t.cy;
+
+        c.quadraticCurveTo(p1x, p1y, (p1x + p2x) / 2, (p1y + p2y) / 2);
       }
-      const lastP = worldToScreen(stroke.points[stroke.points.length - 1].x, stroke.points[stroke.points.length - 1].y);
-      c.lineTo(lastP.x, lastP.y);
+      
+      const lastIdx = stroke.points.length - 1;
+      dx = stroke.points[lastIdx].x - t.camX;
+      dy = stroke.points[lastIdx].y - t.camY;
+      const lastX = (dx * t.cos - dy * t.sin) * t.scale + t.cx;
+      const lastY = (dx * t.sin + dy * t.cos) * t.scale + t.cy;
+      
+      c.lineTo(lastX, lastY);
       c.stroke();
     }
     c.restore();
   }
 
-  // --- VIEWPORT AABB MATH (Fixes rotated QuadTree queries) ---
-  function getViewportAABB() {
-    const w = canvasEl.clientWidth;
-    const h = canvasEl.clientHeight;
-    const tl = screenToWorld(0, 0);
-    const tr = screenToWorld(w, 0);
-    const bl = screenToWorld(0, h);
-    const br = screenToWorld(w, h);
-    return {
-      minX: Math.min(tl.x, tr.x, bl.x, br.x),
-      maxX: Math.max(tl.x, tr.x, bl.x, br.x),
-      minY: Math.min(tl.y, tr.y, bl.y, br.y),
-      maxY: Math.max(tl.y, tr.y, bl.y, br.y)
-    };
-  }
-
-  // --- SINGLE CANVAS RENDERING PIPELINE ---
   let renderScheduled = false;
   function redraw() {
     if (renderScheduled) return;
@@ -270,6 +322,8 @@
     requestAnimationFrame(function() {
       renderScheduled = false;
       if (!ctx) return;
+      
+      updateFrameTransform();
       
       const w = canvasEl.clientWidth;
       const h = canvasEl.clientHeight;
@@ -291,7 +345,6 @@
         }
       }
       
-      // If a stroke is currently being drawn, draw it on top
       if (gesture && gesture.type === "draw" && screenPointCount > 0) {
         ctx.save();
         ctx.lineCap = "round";
@@ -328,7 +381,6 @@
     const overlay = document.getElementById("saving-overlay");
     if (overlay) overlay.classList.add("visible");
     
-    // IMMUTABLE SNAPSHOT (Fixes the race condition)
     const snapshot = JSON.parse(JSON.stringify(pendingSave));
     pendingSave = null;
     
@@ -353,7 +405,7 @@
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
 
-    isPenActive = true; // State flag replaces DOM churn
+    isPenActive = true;
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
     }
@@ -378,7 +430,6 @@
     };
     gesture = { type: "draw" };
 
-    // Reset Typed Array
     screenPointCount = 0;
     screenPoints[screenPointCount * 2] = sx;
     screenPoints[screenPointCount * 2 + 1] = sy;
@@ -403,7 +454,6 @@
     const dy = sy - lastY;
     if ((dx * dx) + (dy * dy) < 2.25) return;
 
-    // Store in Typed Array (No object allocation)
     screenPoints[screenPointCount * 2] = sx;
     screenPoints[screenPointCount * 2 + 1] = sy;
     screenPointCount++;
@@ -414,14 +464,13 @@
   function penUp(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
 
-    isPenActive = false; // Release state flag
+    isPenActive = false;
     if (canvasEl.releasePointerCapture) {
       try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
     }
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
     if (gesture && gesture.type === "draw" && currentStroke) {
-      // Deferred Math: Convert Float32Array back to World Points
       if (strokeOriginCamera && screenPointCount > 0) {
         const c = strokeOriginCamera;
         const cos = Math.cos(-c.rotation);
@@ -462,7 +511,7 @@
 
   // --- 2. TOUCH INPUT ---
   function touchStart(e) {
-    if (isPenActive) return; // Immediate bail out
+    if (isPenActive) return;
     if (gesture && gesture.type === "draw") return;
 
     const rect = canvasEl.getBoundingClientRect();
@@ -490,7 +539,7 @@
   }
 
   function touchMove(e) {
-    if (isPenActive) return; // Immediate bail out
+    if (isPenActive) return;
     if (gesture && gesture.type === "draw") return;
     if (!gesture) return;
 
@@ -567,7 +616,7 @@
   }
 
   function touchEnd(e) {
-    if (isPenActive) return; // Immediate bail out
+    if (isPenActive) return;
     if (gesture && gesture.type === "draw") return;
     if (!gesture) return;
 
