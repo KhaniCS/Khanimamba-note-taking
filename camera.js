@@ -19,6 +19,7 @@
       this.cy = 0;
 
       this._inv = { cos: 1, sin: 0 };
+      this._invRotation = null; // cache key
     }
 
     markDirty() { this.dirty = true; this.panDirty = true; }
@@ -27,6 +28,16 @@
     setPosition(x, y, scale, rotation) {
       this.x = x; this.y = y; this.scale = scale; this.rotation = rotation;
       this.markDirty();
+    }
+
+    // CACHED: recompute only when rotation actually changes
+    _invRot() {
+      if (this._invRotation !== this.rotation) {
+        this._inv.cos = Math.cos(-this.rotation);
+        this._inv.sin = Math.sin(-this.rotation);
+        this._invRotation = this.rotation;
+      }
+      return this._inv;
     }
 
     pan(dx, dy) {
@@ -46,13 +57,6 @@
       const mdx = sx - cx, mdy = sy - cy;
       this.x = worldMid.x - (mdx * r.cos - mdy * r.sin) / newScale;
       this.y = worldMid.y - (mdx * r.sin + mdy * r.cos) / newScale;
-    }
-
-    // THE EXTRACTION: one place for the cos/sin(-rotation) pair
-    _invRot() {
-      this._inv.cos = Math.cos(-this.rotation);
-      this._inv.sin = Math.sin(-this.rotation);
-      return this._inv;
     }
 
     updateMatrix(cx, cy) {
@@ -97,8 +101,10 @@
         const c = corners[i];
         const wx = this.x + (c.x * r.cos - c.y * r.sin) * inv;
         const wy = this.y + (c.x * r.sin + c.y * r.cos) * inv;
-        minX = Math.min(minX, wx); maxX = Math.max(maxX, wx);
-        minY = Math.min(minY, wy); maxY = Math.max(maxY, wy);
+        if (wx < minX) minX = wx;
+        if (wx > maxX) maxX = wx;
+        if (wy < minY) minY = wy;
+        if (wy > maxY) maxY = wy;
       }
       return { minX, maxX, minY, maxY };
     }
