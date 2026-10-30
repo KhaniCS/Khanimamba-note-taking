@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const deps = ["Store", "Camera", "PanBuffer", "Toolbar", "AutoSaver"];
+  const deps = ["Geo", "Store", "Camera", "PanBuffer", "Toolbar", "AutoSaver"];
   const missingDep = deps.find(name => !window[name]);
   if (missingDep) return window.showError(missingDep.toLowerCase() + ".js is missing.", "orange");
 
@@ -10,13 +10,29 @@
   const toolbar = new window.Toolbar();
   const autosaver = new window.AutoSaver(Store, 5000);
 
-  const MIN_SCALE = 0.000000001;
-  const MAX_SCALE = 1000000000;
-  const CLAMP_SCALE = (v) => v < MIN_SCALE ? MIN_SCALE : v > MAX_SCALE ? MAX_SCALE : v;
+  const Geo = window.Geo;
+
+  // ---- tuning numbers: every "magic number" lives here, with a name --------
+  const MIN_SCALE = 1e-9;             // furthest zoom-out
+  const MAX_SCALE = 1e9;              // furthest zoom-in
+  const BG_OVERSCAN = 0.2;            // background canvas extends 20% past each screen edge
+  const PAN_START_DIST = 15;          // px a finger must move before it counts as a pan
+  const MIN_POINT_DIST = 1.5;         // px the pen must move before a new point is recorded
+  const ROT_SNAP_DEG = 5;             // rotation snaps back to 0 when within this many degrees
+  const ROT_SNAP_HOLD_MS = 1000;      // ...and stays snapped for this long
+  const GRID_BASE = 100;              // grid spacing at 100% zoom (world units)
+  const GRID_MIN_PX = 30;             // grid dots are kept between 30px and 60px apart
+  const GRID_DOT_RADIUS = 1.5;        // px
+  const FIT_PAD = 400;                // world units of breathing room around content on "LOST"
+  const FALLBACK_VIEW = { w: 1000, h: 800 }; // used only if the view has no size yet
+  const TAU = Math.PI * 2;            // a full circle
+
+  const CLAMP_SCALE = (v) => Geo.clamp(v, MIN_SCALE, MAX_SCALE);
   const isPen = (e) => e.pointerType === "pen" || e.pointerType === "mouse";
   const hasPoints = (s) => s && s.points && s.points.length > 0;
   const $ = (id) => document.getElementById(id);
   const snap = (val, spacing) => Math.floor(val / spacing) * spacing;
+  const percent = (v) => (v * 100).toFixed(2) + "%";
   const DPR = () => window.devicePixelRatio || 1;
   const strokeScreenWidth = (stroke) => (stroke.width || 4) * camera.scale;
 
@@ -37,20 +53,6 @@
 
   let halfW = 0;
   let halfH = 0;
-
-  function emptyBounds() { return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; }
-
-  function extendBounds(b, x, y) {
-    b.minX = Math.min(b.minX, x); b.maxX = Math.max(b.maxX, x);
-    b.minY = Math.min(b.minY, y); b.maxY = Math.max(b.maxY, y);
-  }
-
-  function mergeBounds(a, b) {
-    if (!b) return a;
-    a.minX = Math.min(a.minX, b.minX); a.maxX = Math.max(a.maxX, b.maxX);
-    a.minY = Math.min(a.minY, b.minY); a.maxY = Math.max(a.maxY, b.maxY);
-    return a;
-  }
 
   // PERF: getBoundingClientRect() forces the browser to recalculate layout. Doing it
   // on every touchmove (right after we changed a CSS transform) is very expensive,
@@ -74,7 +76,7 @@
     const p1 = localPoint(t1, rect);
     const dx = p1.x - p0.x, dy = p1.y - p0.y;
     return {
-      dist: Math.sqrt(dx * dx + dy * dy) || 1,
+      dist: Math.sqrt(Geo.dist2(dx, dy)) || 1,
       angle: Math.atan2(dy, dx),
       midX: (p0.x + p1.x) / 2,
       midY: (p0.y + p1.y) / 2
@@ -105,25 +107,15 @@
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  function strokeBounds(stroke) {
-    if (!hasPoints(stroke)) return null;
-    const b = emptyBounds();
-    for (const p of stroke.points) extendBounds(b, p.x, p.y);
-    return b;
-  }
+  const strokeBounds = (stroke) => hasPoints(stroke) ? Geo.boundsOfPoints(stroke.points) : null;
 
   function updateIndicators() {
     const { scale, rotation } = camera;
     if (zoomEl) zoomEl.textContent = scale >= 0.01 ? Math.round(scale * 100) + "%" : scale.toExponential(1);
-    if (rotEl) rotEl.textContent = Math.round(rotation * 180 / Math.PI) + "°";
+    if (rotEl) rotEl.textContent = Math.round(Geo.toDeg(rotation)) + "°";
   }
 
-  function getGridSpacing() {
-    let spacing = 100;
-    while (spacing * camera.scale < 30) spacing *= 2;
-    while (spacing * camera.scale > 60) spacing /= 2;
-    return spacing;
-  }
+  const getGridSpacing = () => Geo.gridSpacing(GRID_BASE, camera.scale, GRID_MIN_PX);
 
   function convertScreenPointsToWorld(stroke, camSnapshot) {
     const cos = Math.cos(-camSnapshot.rotation);
@@ -132,8 +124,8 @@
       const px = screenX[i] - halfW;
       const py = screenY[i] - halfH;
       stroke.points.push({
-        x: (px * cos - py * sin) / camSnapshot.scale + camSnapshot.x,
-        y: (px * sin + py * cos) / camSnapshot.scale + camSnapshot.y
+        x: Geo.rotX(px, py, cos, sin) / camSnapshot.scale + camSnapshot.x,
+        y: Geo.rotY(px, py, cos, sin) / camSnapshot.scale + camSnapshot.y
       });
     }
   }
@@ -200,7 +192,7 @@
       start(p) { return { type: "pending_pan", startX: p.x, startY: p.y }; },
       move(g, e, rect) {
         const p = firstTouch(e, rect);
-        if ((p.x - g.startX) ** 2 + (p.y - g.startY) ** 2 > 225) return Gesture.pan.start(p);
+        if (Geo.dist2(p.x - g.startX, p.y - g.startY) > PAN_START_DIST ** 2) return Gesture.pan.start(p);
         return g;
       },
       end() { return null; }
@@ -243,9 +235,9 @@
         return g;
       },
       end(g, e) {
-        if (!toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+        if (!toolbar.rotationLocked && Math.abs(camera.rotation) < ROT_SNAP_DEG * Geo.DEG) {
           camera.rotation = 0;
-          toolbar.rotationSnapHoldUntil = Date.now() + 1000;
+          toolbar.rotationSnapHoldUntil = Date.now() + ROT_SNAP_HOLD_MS;
           camera.markDirty();
           refreshUI();
         }
@@ -321,14 +313,14 @@
     c.beginPath();
 
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
-      let sx = wx * a - startY * b + tx;
-      let sy = wx * b + startY * a + ty;
+      let sx = Geo.rotX(wx, startY, a, b) + tx;
+      let sy = Geo.rotY(wx, startY, a, b) + ty;
 
       for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
         // FIX: start each dot as its own sub-path. Without this moveTo, canvas
         // joins consecutive arcs with straight lines and fill() paints grey wedges.
-        c.moveTo(sx + 1.5, sy);
-        c.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        c.moveTo(sx + GRID_DOT_RADIUS, sy);
+        c.arc(sx, sy, GRID_DOT_RADIUS, 0, TAU);
         sx += stepX;
         sy += stepY;
       }
@@ -348,12 +340,12 @@
     const pts = stroke.points;
     const { a, b, tx, ty } = camera;
 
-    let prevX = pts[0].x * a - pts[0].y * b + tx;
-    let prevY = pts[0].x * b + pts[0].y * a + ty;
+    let prevX = Geo.rotX(pts[0].x, pts[0].y, a, b) + tx;
+    let prevY = Geo.rotY(pts[0].x, pts[0].y, a, b) + ty;
 
     if (pts.length === 1) {
       c.beginPath();
-      c.arc(prevX, prevY, screenWidth / 2, 0, Math.PI * 2);
+      c.arc(prevX, prevY, screenWidth / 2, 0, TAU);
       c.fill();
       return;
     }
@@ -361,12 +353,12 @@
     c.beginPath();
     c.moveTo(prevX, prevY);
 
-    let curX = pts[1].x * a - pts[1].y * b + tx;
-    let curY = pts[1].x * b + pts[1].y * a + ty;
+    let curX = Geo.rotX(pts[1].x, pts[1].y, a, b) + tx;
+    let curY = Geo.rotY(pts[1].x, pts[1].y, a, b) + ty;
 
     for (let i = 1; i < pts.length - 1; i++) {
-      const nextX = pts[i + 1].x * a - pts[i + 1].y * b + tx;
-      const nextY = pts[i + 1].x * b + pts[i + 1].y * a + ty;
+      const nextX = Geo.rotX(pts[i + 1].x, pts[i + 1].y, a, b) + tx;
+      const nextY = Geo.rotY(pts[i + 1].x, pts[i + 1].y, a, b) + ty;
       c.quadraticCurveTo(curX, curY, (curX + nextX) / 2, (curY + nextY) / 2);
       curX = nextX;
       curY = nextY;
@@ -404,12 +396,8 @@
         visible = visible.slice().sort((p, q) => p._z - q._z);
       }
       for (const s of visible) {
-        const sb = s.bounds;
-        if (sb) {
-          const pad = (s.width || 4) / 2;
-          if (sb.maxX + pad < bounds.minX || sb.minX - pad > bounds.maxX ||
-              sb.maxY + pad < bounds.minY || sb.minY - pad > bounds.maxY) continue;
-        }
+        // skip strokes that are completely off-screen (pad = half the pen width)
+        if (s.bounds && !Geo.boundsOverlap(s.bounds, bounds, (s.width || 4) / 2)) continue;
         drawStrokeOn(bgCtx, s);
       }
     }
@@ -468,7 +456,7 @@
     clearLive();
     applyPenStyle(liveCtx, currentStroke, strokeScreenWidth(currentStroke));
     liveCtx.beginPath();
-    liveCtx.arc(p.x, p.y, liveCtx.lineWidth / 2, 0, Math.PI * 2);
+    liveCtx.arc(p.x, p.y, liveCtx.lineWidth / 2, 0, TAU);
     liveCtx.fill();
     liveDrawnCount = 1;
   }
@@ -479,7 +467,7 @@
 
     const dx = p.x - screenX[screenCount - 1];
     const dy = p.y - screenY[screenCount - 1];
-    if (dx * dx + dy * dy < 2.25) return;
+    if (Geo.dist2(dx, dy) < MIN_POINT_DIST ** 2) return;
 
     pushPoint(p.x, p.y);
     scheduleIncrementalLiveDraw();
@@ -549,13 +537,21 @@
     bgCtx = bgCanvas.getContext("2d");
     liveCtx = liveCanvas.getContext("2d");
 
+    // The background canvas is BG_OVERSCAN bigger than the screen on every side.
+    // Its size, its position, its pixel resolution and the pan buffer's margin are
+    // ALL derived from that one number, so they can never drift out of step again
+    // (a mismatch between them is what caused the "ink jumps up" bug).
+    const BG_FACTOR = 1 + 2 * BG_OVERSCAN;
+    bgCanvas.style.left = bgCanvas.style.top = percent(-BG_OVERSCAN);
+    bgCanvas.style.width = bgCanvas.style.height = percent(BG_FACTOR);
+
     function resize() {
       invalidateRect();
       const { w, h } = liveSize();
       halfW = w / 2; halfH = h / 2;
       resizeLayer(liveCanvas, liveCtx, w, h, 1.0);
-      resizeLayer(bgCanvas, bgCtx, w, h, 1.4);
-      panBuffer = new window.PanBuffer(camera, bgCanvas);
+      resizeLayer(bgCanvas, bgCtx, w, h, BG_FACTOR);
+      panBuffer = new window.PanBuffer(camera, bgCanvas, BG_OVERSCAN);
       camera.markDirty();
       renderBackground();
     }
@@ -614,8 +610,8 @@
   function centerOnContent() {
     if (!canvasData || canvasData.strokes.length === 0) return;
 
-    const agg = emptyBounds();
-    for (const s of canvasData.strokes) mergeBounds(agg, strokeBounds(s));
+    const agg = Geo.emptyBounds();
+    for (const s of canvasData.strokes) Geo.mergeBounds(agg, strokeBounds(s));
     if (!isFinite(agg.minX)) return;
 
     pendingPanDx = 0; pendingPanDy = 0; // discard stale queued movement
@@ -623,7 +619,10 @@
     camera.setPosition(
       (agg.minX + agg.maxX) / 2,
       (agg.minY + agg.maxY) / 2,
-      CLAMP_SCALE(Math.min(1000 / (agg.maxX - agg.minX + 400), 800 / (agg.maxY - agg.minY + 400))),
+      CLAMP_SCALE(Geo.fitScale(
+        agg.maxX - agg.minX, agg.maxY - agg.minY,
+        halfW * 2 || FALLBACK_VIEW.w, halfH * 2 || FALLBACK_VIEW.h, FIT_PAD
+      )),
       0
     );
 
