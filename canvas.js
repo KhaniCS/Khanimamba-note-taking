@@ -1,93 +1,160 @@
 (function () {
   "use strict";
 
-  // --- DEPENDENCY CHECKS (Fail loudly if a file is missing) ---
-  if (!window.Store) return window.showError("store.js is missing.", "orange");
-  if (!window.Camera) return window.showError("camera.js is missing. Did you create the file?", "orange");
-  if (!window.PanBuffer) return window.showError("panbuffer.js is missing. Did you create the file?", "orange");
-  if (!window.Toolbar) return window.showError("toolbar.js is missing. Did you create the file?", "orange");
-  if (!window.AutoSaver) return window.showError("autosaver.js is missing. Did you create the file?", "orange");
+  // 1. DEPENDENCY CHECK — data table
+  const deps = ["Store", "Camera", "PanBuffer", "Toolbar", "AutoSaver"];
+  const missingDep = deps.find(name => !window[name]);
+  if (missingDep) return window.showError(missingDep.toLowerCase() + ".js is missing.", "orange");
 
   const Store = window.Store;
   const camera = new window.Camera();
   const toolbar = new window.Toolbar();
   const autosaver = new window.AutoSaver(Store, 5000);
-  
+
+  const MIN_SCALE = 0.000000001;
+  const MAX_SCALE = 1000000000;
+  const CLAMP_SCALE = (v) => v < MIN_SCALE ? MIN_SCALE : v > MAX_SCALE ? MAX_SCALE : v;
+  const isPen = (e) => e.pointerType === "pen" || e.pointerType === "mouse";
+  const $ = (id) => document.getElementById(id);
+
+  let bgCanvas, bgCtx, liveCanvas, liveCtx, toolbarEl, zoomEl, rotEl, backBtn;
+
   let panBuffer = null;
   let canvasData = null;
-
-  let bgCanvas = null, bgCtx = null;
-  let liveCanvas = null, liveCtx = null;
-  let toolbarEl = null;
-
   let currentStroke = null;
   let isPenActive = false;
-  let screenPointCount = 0;
-  const MAX_POINTS = 50000;
-  const screenPoints = new Float32Array(MAX_POINTS * 2);
   let strokeOriginCamera = null;
 
-  // --- INDICATORS ---
-  function updateIndicators() {
-    const scale = camera.scale;
-    const zoomEl = document.getElementById("zoom-indicator");
-    const rotEl = document.getElementById("rotation-indicator");
-    
-    if (zoomEl) {
-      zoomEl.textContent = scale >= 0.01 ? Math.round(scale * 100) + "%" : scale.toExponential(1);
-    }
-    if (rotEl) {
-      const deg = Math.round(camera.rotation * 180 / Math.PI);
-      rotEl.textContent = deg + "°";
-    }
+  const MAX_POINTS = 50000;
+  const screenX = new Float32Array(MAX_POINTS);
+  const screenY = new Float32Array(MAX_POINTS);
+  let screenCount = 0;
+
+  let halfW = 0;
+  let halfH = 0;
+
+  const _ptA = { x: 0, y: 0 };
+  const _ptB = { x: 0, y: 0 };
+  const _ptC = { x: 0, y: 0 };
+  const _inv = { cos: 1, sin: 0 };
+
+  function projectToScreen(wx, wy, out) {
+    const { a, b, tx, ty } = camera;
+    out.x = wx * a - wy * b + tx;
+    out.y = wx * b + wy * a + ty;
   }
 
-  // --- QUADTREE ---
+  function localPoint(touch, rect) {
+    return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
+  }
+
+  function beginPendingPan(touch, rect) {
+    return { type: "pending_pan", startX: touch.clientX - rect.left, startY: touch.clientY - rect.top };
+  }
+
+  function cacheInverseRotation(rotation) {
+    _inv.cos = Math.cos(-rotation);
+    _inv.sin = Math.sin(-rotation);
+    return _inv;
+  }
+
+  function strokeColor(stroke) {
+    return stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
+  }
+
+  function applyPenStyle(ctx, stroke) {
+    const color = strokeColor(stroke);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = (stroke.width || 4) * camera.scale;
+  }
+
+  function pushPoint(x, y) {
+    if (screenCount >= MAX_POINTS) return false;
+    screenX[screenCount] = x;
+    screenY[screenCount] = y;
+    screenCount++;
+    return true;
+  }
+
+  function resizeLayer(canvas, context, w, h, factor) {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = w * factor * dpr;
+    canvas.height = h * factor * dpr;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+
+  function strokeBounds(stroke) {
+    if (!stroke || !stroke.points || stroke.points.length === 0) return null;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of stroke.points) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  function updateIndicators() {
+    const { scale, rotation } = camera;
+    if (zoomEl) zoomEl.textContent = scale >= 0.01 ? Math.round(scale * 100) + "%" : scale.toExponential(1);
+    if (rotEl) rotEl.textContent = Math.round(rotation * 180 / Math.PI) + "°";
+  }
+
   class QuadTree {
     constructor(bounds, maxObjects, maxLevels, level) {
       this.bounds = bounds; this.maxObjects = maxObjects || 10; this.maxLevels = maxLevels || 4; this.level = level || 0;
       this.objects = []; this.nodes = [];
     }
     split() {
-      const nextLevel = this.level + 1; const w = this.bounds.w / 2; const h = this.bounds.h / 2;
-      const x = this.bounds.x; const y = this.bounds.y;
-      this.nodes[0] = new QuadTree({ x: x + w, y: y, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
-      this.nodes[1] = new QuadTree({ x: x, y: y, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
-      this.nodes[2] = new QuadTree({ x: x, y: y + h, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
-      this.nodes[3] = new QuadTree({ x: x + w, y: y + h, w: w, h: h }, this.maxObjects, this.maxLevels, nextLevel);
+      const lvl = this.level + 1;
+      const w = this.bounds.w / 2, h = this.bounds.h / 2;
+      const x = this.bounds.x, y = this.bounds.y;
+      this.nodes = [
+        new QuadTree({ x: x + w, y: y, w, h }, this.maxObjects, this.maxLevels, lvl),
+        new QuadTree({ x: x, y: y, w, h }, this.maxObjects, this.maxLevels, lvl),
+        new QuadTree({ x: x, y: y + h, w, h }, this.maxObjects, this.maxLevels, lvl),
+        new QuadTree({ x: x + w, y: y + h, w, h }, this.maxObjects, this.maxLevels, lvl)
+      ];
     }
     getIndex(box) {
-      let index = -1; const midX = this.bounds.x + this.bounds.w / 2; const midY = this.bounds.y + this.bounds.h / 2;
-      const top = (box.minY < midY && box.maxY < midY); const bottom = (box.minY > midY);
-      if (box.minX < midX && box.maxX < midX) { if (top) index = 1; else if (bottom) index = 2; }
-      else if (box.minX > midX) { if (top) index = 0; else if (bottom) index = 3; }
-      return index;
+      const midX = this.bounds.x + this.bounds.w / 2;
+      const midY = this.bounds.y + this.bounds.h / 2;
+      const top = box.minY < midY && box.maxY < midY;
+      const bottom = box.minY > midY;
+      if (box.minX < midX && box.maxX < midX) return top ? 1 : bottom ? 2 : -1;
+      if (box.minX > midX) return top ? 0 : bottom ? 3 : -1;
+      return -1;
     }
     insert(item) {
-      if (this.nodes.length) { const index = this.getIndex(item.bounds); if (index !== -1) { this.nodes[index].insert(item); return; } }
+      if (this.nodes.length) {
+        const idx = this.getIndex(item.bounds);
+        if (idx !== -1) return this.nodes[idx].insert(item);
+      }
       this.objects.push(item);
       if (this.objects.length > this.maxObjects && this.level < this.maxLevels) {
         if (!this.nodes.length) this.split();
         let i = 0;
         while (i < this.objects.length) {
-          const index = this.getIndex(this.objects[i].bounds);
-          if (index !== -1) this.nodes[index].insert(this.objects.splice(i, 1)[0]); else i++;
+          const idx = this.getIndex(this.objects[i].bounds);
+          if (idx !== -1) this.nodes[idx].insert(this.objects.splice(i, 1)[0]);
+          else i++;
         }
       }
     }
     retrieve(box) {
-      let returnObjects = this.objects;
+      let out = this.objects;
       if (this.nodes.length) {
-        const index = this.getIndex(box);
-        if (index !== -1) returnObjects = returnObjects.concat(this.nodes[index].retrieve(box));
-        else for (let i = 0; i < this.nodes.length; i++) returnObjects = returnObjects.concat(this.nodes[i].retrieve(box));
+        const idx = this.getIndex(box);
+        if (idx !== -1) out = out.concat(this.nodes[idx].retrieve(box));
+        else for (let i = 0; i < this.nodes.length; i++) out = out.concat(this.nodes[i].retrieve(box));
       }
-      return returnObjects;
+      return out;
     }
   }
   let strokeTree = null;
 
-  // --- RENDERING LOGIC ---
   function drawGrid(c, w, h, cx, cy) {
     let spacing = 100;
     while (spacing * camera.scale < 30) spacing *= 2;
@@ -100,62 +167,53 @@
     c.fillStyle = "#d0d0d8";
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
       for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
-        const sx = wx * camera.a - wy * camera.b + camera.tx;
-        const sy = wx * camera.b + wy * camera.a + camera.ty;
-        c.beginPath(); c.arc(sx, sy, 1.5, 0, Math.PI * 2); c.fill();
+        projectToScreen(wx, wy, _ptA);
+        c.beginPath(); c.arc(_ptA.x, _ptA.y, 1.5, 0, Math.PI * 2); c.fill();
       }
     }
   }
 
   function drawStrokeOn(c, stroke) {
     if (!stroke.points || stroke.points.length === 0) return;
-    const screenWidth = (stroke.width || 4) * camera.scale;
-    if (screenWidth < 0.1) return;
+    if ((stroke.width || 4) * camera.scale < 0.1) return;
 
-    c.lineCap = "round"; c.lineJoin = "round";
-    c.strokeStyle = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
-    c.fillStyle = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
-    c.lineWidth = screenWidth;
+    applyPenStyle(c, stroke);
+    const pts = stroke.points;
 
-    if (stroke.points.length === 1) {
-      const sx = stroke.points[0].x * camera.a - stroke.points[0].y * camera.b + camera.tx;
-      const sy = stroke.points[0].x * camera.b + stroke.points[0].y * camera.a + camera.ty;
-      c.beginPath(); c.arc(sx, sy, c.lineWidth / 2, 0, Math.PI * 2); c.fill();
-    } else {
-      c.beginPath();
-      let sx = stroke.points[0].x * camera.a - stroke.points[0].y * camera.b + camera.tx;
-      let sy = stroke.points[0].x * camera.b + stroke.points[0].y * camera.a + camera.ty;
-      c.moveTo(sx, sy);
-
-      for (let i = 1; i < stroke.points.length - 1; i++) {
-        const p1x = stroke.points[i].x * camera.a - stroke.points[i].y * camera.b + camera.tx;
-        const p1y = stroke.points[i].x * camera.b + stroke.points[i].y * camera.a + camera.ty;
-        const p2x = stroke.points[i + 1].x * camera.a - stroke.points[i + 1].y * camera.b + camera.tx;
-        const p2y = stroke.points[i + 1].x * camera.b + stroke.points[i + 1].y * camera.a + camera.ty;
-        c.quadraticCurveTo(p1x, p1y, (p1x + p2x) / 2, (p1y + p2y) / 2);
-      }
-      const lastIdx = stroke.points.length - 1;
-      sx = stroke.points[lastIdx].x * camera.a - stroke.points[lastIdx].y * camera.b + camera.tx;
-      sy = stroke.points[lastIdx].x * camera.b + stroke.points[lastIdx].y * camera.a + camera.ty;
-      c.lineTo(sx, sy); c.stroke();
+    if (pts.length === 1) {
+      projectToScreen(pts[0].x, pts[0].y, _ptA);
+      c.beginPath(); c.arc(_ptA.x, _ptA.y, c.lineWidth / 2, 0, Math.PI * 2); c.fill();
+      return;
     }
+
+    projectToScreen(pts[0].x, pts[0].y, _ptA);
+    c.beginPath();
+    c.moveTo(_ptA.x, _ptA.y);
+
+    for (let i = 1; i < pts.length - 1; i++) {
+      projectToScreen(pts[i].x, pts[i].y, _ptB);
+      projectToScreen(pts[i + 1].x, pts[i + 1].y, _ptC);
+      c.quadraticCurveTo(_ptB.x, _ptB.y, (_ptB.x + _ptC.x) / 2, (_ptB.y + _ptC.y) / 2);
+    }
+
+    projectToScreen(pts[pts.length - 1].x, pts[pts.length - 1].y, _ptA);
+    c.lineTo(_ptA.x, _ptA.y);
+    c.stroke();
   }
 
   function renderBackground() {
     const w = bgCanvas.width / (window.devicePixelRatio || 1);
     const h = bgCanvas.height / (window.devicePixelRatio || 1);
-    const cx = w / 2; const cy = h / 2;
+    const cx = w / 2, cy = h / 2;
 
     camera.updateMatrix(cx, cy);
     bgCtx.clearRect(0, 0, w, h);
     drawGrid(bgCtx, w, h, cx, cy);
-    
+
     if (canvasData) {
-      const viewBox = camera.getVisibleBounds(w, h, cx, cy);
-      const visibleStrokes = strokeTree ? strokeTree.retrieve(viewBox) : canvasData.strokes;
-      for (let i = 0; i < visibleStrokes.length; i++) {
-        drawStrokeOn(bgCtx, visibleStrokes[i]);
-      }
+      const view = camera.getVisibleBounds(w, h, cx, cy);
+      const visible = strokeTree ? strokeTree.retrieve(view) : canvasData.strokes;
+      for (const s of visible) drawStrokeOn(bgCtx, s);
     }
   }
 
@@ -166,85 +224,67 @@
     requestAnimationFrame(() => {
       renderScheduled = false;
       liveCtx.clearRect(0, 0, liveCanvas.clientWidth, liveCanvas.clientHeight);
-      if (currentStroke && screenPointCount > 0) {
-        liveCtx.lineCap = "round"; liveCtx.lineJoin = "round";
-        liveCtx.strokeStyle = currentStroke.isEraser ? "#fbfaf7" : currentStroke.color;
-        liveCtx.lineWidth = currentStroke.width * camera.scale;
-        liveCtx.beginPath();
-        for (let i = 0; i < screenPointCount; i++) {
-          const sx = screenPoints[i * 2]; const sy = screenPoints[i * 2 + 1];
-          if (i === 0) liveCtx.moveTo(sx, sy); else liveCtx.lineTo(sx, sy);
-        }
-        liveCtx.stroke();
+      if (!currentStroke || screenCount === 0) return;
+
+      applyPenStyle(liveCtx, currentStroke);
+      liveCtx.beginPath();
+      for (let i = 0; i < screenCount; i++) {
+        if (i === 0) liveCtx.moveTo(screenX[i], screenY[i]);
+        else liveCtx.lineTo(screenX[i], screenY[i]);
       }
+      liveCtx.stroke();
     });
   }
 
-  // --- INPUT HANDLING ---
   function penDown(e) {
-    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (!isPen(e)) return;
     e.preventDefault();
     isPenActive = true;
     if (toolbarEl) toolbarEl.style.pointerEvents = "none";
 
-    const rect = liveCanvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-
+    const p = localPoint(e, liveCanvas.getBoundingClientRect());
     strokeOriginCamera = { x: camera.x, y: camera.y, scale: camera.scale, rotation: camera.rotation };
     currentStroke = {
       id: Store.uuid(), points: [], color: toolbar.currentColor,
       width: toolbar.currentSize / camera.scale, isEraser: toolbar.currentTool === "eraser", originScale: camera.scale
     };
-    
-    screenPointCount = 0;
-    screenPoints[0] = sx; screenPoints[1] = sy; screenPointCount++;
+    screenCount = 0;
+    pushPoint(p.x, p.y);
     redrawLive();
   }
 
   function penMove(e) {
-    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
-    if (!currentStroke || screenPointCount >= MAX_POINTS) return;
+    if (!isPen(e) || !currentStroke || screenCount >= MAX_POINTS) return;
 
-    const rect = liveCanvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left; const sy = e.clientY - rect.top;
-    const lastX = screenPoints[(screenPointCount - 1) * 2];
-    const lastY = screenPoints[(screenPointCount - 1) * 2 + 1];
+    const p = localPoint(e, liveCanvas.getBoundingClientRect());
+    const dx = p.x - screenX[screenCount - 1];
+    const dy = p.y - screenY[screenCount - 1];
+    if (dx * dx + dy * dy < 2.25) return;
 
-    if ((sx - lastX) ** 2 + (sy - lastY) ** 2 < 2.25) return;
-
-    screenPoints[screenPointCount * 2] = sx; screenPoints[screenPointCount * 2 + 1] = sy;
-    screenPointCount++;
+    pushPoint(p.x, p.y);
     redrawLive();
   }
 
   function penUp(e) {
-    if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
+    if (!isPen(e)) return;
     isPenActive = false;
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
-    if (currentStroke && screenPointCount > 0) {
+    if (currentStroke && screenCount > 0) {
       const c = strokeOriginCamera;
-      const cos = Math.cos(-c.rotation); const sin = Math.sin(-c.rotation);
-      const cx = liveCanvas.clientWidth / 2; 
-      const cy = liveCanvas.clientHeight / 2;
+      const r = cacheInverseRotation(c.rotation);
 
-      for (let i = 0; i < screenPointCount; i++) {
-        const px = screenPoints[i * 2] - cx; const py = screenPoints[i * 2 + 1] - cy;
+      for (let i = 0; i < screenCount; i++) {
+        const px = screenX[i] - halfW;
+        const py = screenY[i] - halfH;
         currentStroke.points.push({
-          x: (px * cos - py * sin) / c.scale + c.x,
-          y: (px * sin + py * cos) / c.scale + c.y
+          x: (px * r.cos - py * r.sin) / c.scale + c.x,
+          y: (px * r.sin + py * r.cos) / c.scale + c.y
         });
       }
 
       if (canvasData) {
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (let i = 0; i < currentStroke.points.length; i++) {
-          if (currentStroke.points[i].x < minX) minX = currentStroke.points[i].x;
-          if (currentStroke.points[i].x > maxX) maxX = currentStroke.points[i].x;
-          if (currentStroke.points[i].y < minY) minY = currentStroke.points[i].y;
-          if (currentStroke.points[i].y > maxY) maxY = currentStroke.points[i].y;
-        }
-        currentStroke.bounds = { minX, minY, maxX, maxY };
+        currentStroke.bounds = strokeBounds(currentStroke);
         canvasData.strokes.push(currentStroke);
         if (strokeTree) strokeTree.insert(currentStroke);
         autosaver.schedule(canvasData);
@@ -255,89 +295,79 @@
     }
   }
 
-  // --- TOUCH (PAN & ZOOM) ---
   const touchCtx = { gesture: null };
 
   function touchStart(e) {
     if (isPenActive) return;
     const rect = liveCanvas.getBoundingClientRect();
+
     if (e.touches.length === 1) {
-      const t = e.touches[0];
-      touchCtx.gesture = { type: "pending_pan", startX: t.clientX - rect.left, startY: t.clientY - rect.top };
+      touchCtx.gesture = beginPendingPan(e.touches[0], rect);
     } else if (e.touches.length === 2) {
-      const t0 = e.touches[0]; const t1 = e.touches[1];
-      const dx = (t1.clientX - rect.left) - (t0.clientX - rect.left);
-      const dy = (t1.clientY - rect.top) - (t0.clientY - rect.top);
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const angle = Math.atan2(dy, dx);
-      const midX = (t0.clientX - rect.left + t1.clientX - rect.left) / 2;
-      const midY = (t0.clientY - rect.top + t1.clientY - rect.top) / 2;
+      const p0 = localPoint(e.touches[0], rect);
+      const p1 = localPoint(e.touches[1], rect);
+      const dx = p1.x - p0.x, dy = p1.y - p0.y;
       touchCtx.gesture = {
-        type: "pinch", startDist: dist, startAngle: angle,
-        startScale: camera.scale, startRotation: camera.rotation,
-        startMid: { x: midX, y: midY }
+        type: "pinch",
+        startDist: Math.sqrt(dx * dx + dy * dy) || 1,
+        startAngle: Math.atan2(dy, dx),
+        startScale: camera.scale,
+        startRotation: camera.rotation,
+        startMid: { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 }
       };
     }
   }
 
   function touchMove(e) {
     if (isPenActive || !touchCtx.gesture) return;
-    e.preventDefault(); 
+    e.preventDefault();
     const rect = liveCanvas.getBoundingClientRect();
 
     if (touchCtx.gesture.type === "pending_pan" && e.touches.length === 1) {
-      const t = e.touches[0];
-      const localX = t.clientX - rect.left; const localY = t.clientY - rect.top;
-      if ((localX - touchCtx.gesture.startX) ** 2 + (localY - touchCtx.gesture.startY) ** 2 > 225) {
-        touchCtx.gesture = { type: "pan", lastX: localX, lastY: localY };
+      const p = localPoint(e.touches[0], rect);
+      if ((p.x - touchCtx.gesture.startX) ** 2 + (p.y - touchCtx.gesture.startY) ** 2 > 225) {
+        touchCtx.gesture = { type: "pan", lastX: p.x, lastY: p.y };
       }
     } else if (touchCtx.gesture.type === "pan" && e.touches.length === 1) {
-      const t = e.touches[0];
-      const localX = t.clientX - rect.left; const localY = t.clientY - rect.top;
-      const dx = localX - touchCtx.gesture.lastX; const dy = localY - touchCtx.gesture.lastY;
-      
-      const needsRender = panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight);
-      
-      const cos = Math.cos(-camera.rotation); const sin = Math.sin(-camera.rotation);
-      camera.x -= (dx * cos - dy * sin) / camera.scale;
-      camera.y -= (dx * sin + dy * cos) / camera.scale;
-      camera.markPanDirty();
-      
-      touchCtx.gesture.lastX = localX; touchCtx.gesture.lastY = localY;
-      
-      if (needsRender) {
+      const p = localPoint(e.touches[0], rect);
+      const dx = p.x - touchCtx.gesture.lastX;
+      const dy = p.y - touchCtx.gesture.lastY;
+
+      if (panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight)) {
         panBuffer.reset();
         renderBackground();
       }
+
+      const r = cacheInverseRotation(camera.rotation);
+      camera.x -= (dx * r.cos - dy * r.sin) / camera.scale;
+      camera.y -= (dx * r.sin + dy * r.cos) / camera.scale;
+      camera.markPanDirty();
+
+      touchCtx.gesture.lastX = p.x;
+      touchCtx.gesture.lastY = p.y;
     } else if (touchCtx.gesture.type === "pinch" && e.touches.length >= 2) {
       panBuffer.reset();
-      const t0 = e.touches[0]; const t1 = e.touches[1];
-      const dx = (t1.clientX - rect.left) - (t0.clientX - rect.left);
-      const dy = (t1.clientY - rect.top) - (t0.clientY - rect.top);
+      const p0 = localPoint(e.touches[0], rect);
+      const p1 = localPoint(e.touches[1], rect);
+      const dx = p1.x - p0.x, dy = p1.y - p0.y;
       const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const currentAngle = Math.atan2(dy, dx);
-      const midX = (t0.clientX - rect.left + t1.clientX - rect.left) / 2;
-      const midY = (t0.clientY - rect.top + t1.clientY - rect.top) / 2;
-      
-      let newScale = touchCtx.gesture.startScale * (dist / touchCtx.gesture.startDist);
-      if (toolbar.zoomLocked) newScale = touchCtx.gesture.startScale;
-      else newScale = Math.max(0.000000001, Math.min(1000000000, newScale));
-      
-      let newRotation = touchCtx.gesture.startRotation;
-      if (!toolbar.rotationLocked && Date.now() >= toolbar.rotationSnapHoldUntil) {
-        newRotation = touchCtx.gesture.startRotation + (currentAngle - touchCtx.gesture.startAngle);
-      }
-      
-      const cx = liveCanvas.clientWidth / 2; const cy = liveCanvas.clientHeight / 2;
-      const worldMid = camera.toWorld(midX, midY, cx, cy);
+      const midX = (p0.x + p1.x) / 2, midY = (p0.y + p1.y) / 2;
 
-      camera.scale = newScale; camera.rotation = newRotation;
+      const g = touchCtx.gesture;
+      const newScale = toolbar.zoomLocked ? g.startScale : CLAMP_SCALE(g.startScale * (dist / g.startDist));
+      const newRot = (!toolbar.rotationLocked && Date.now() >= toolbar.rotationSnapHoldUntil)
+        ? g.startRotation + (Math.atan2(dy, dx) - g.startAngle)
+        : g.startRotation;
+
+      const worldMid = camera.toWorld(midX, midY, halfW, halfH);
+      camera.scale = newScale;
+      camera.rotation = newRot;
       camera.markDirty();
 
-      const cosNeg = Math.cos(-newRotation); const sinNeg = Math.sin(-newRotation);
-      const mdx = midX - cx; const mdy = midY - cy;
-      camera.x = worldMid.x - (mdx * cosNeg - mdy * sinNeg) / newScale;
-      camera.y = worldMid.y - (mdx * sinNeg + mdy * cosNeg) / newScale;
+      const r = cacheInverseRotation(newRot);
+      const mdx = midX - halfW, mdy = midY - halfH;
+      camera.x = worldMid.x - (mdx * r.cos - mdy * r.sin) / newScale;
+      camera.y = worldMid.y - (mdx * r.sin + mdy * r.cos) / newScale;
 
       updateIndicators();
       renderBackground();
@@ -346,28 +376,28 @@
 
   function touchEnd(e) {
     if (isPenActive || !touchCtx.gesture) return;
+
     if (e.touches.length === 0) {
-      if (touchCtx.gesture.type === "pinch" && !toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
-        camera.rotation = 0; 
-        toolbar.rotationSnapHoldUntil = Date.now() + 1000; 
+      const g = touchCtx.gesture;
+      if (g.type === "pinch" && !toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+        camera.rotation = 0;
+        toolbar.rotationSnapHoldUntil = Date.now() + 1000;
         camera.markDirty();
         updateIndicators();
-        panBuffer.reset(); 
+        panBuffer.reset();
         renderBackground();
       }
       touchCtx.gesture = null;
     } else if (e.touches.length === 1 && touchCtx.gesture.type === "pinch") {
-      const t = e.touches[0]; const r = liveCanvas.getBoundingClientRect();
-      touchCtx.gesture = { type: "pending_pan", startX: t.clientX - r.left, startY: t.clientY - r.top };
+      touchCtx.gesture = beginPendingPan(e.touches[0], liveCanvas.getBoundingClientRect());
     }
   }
 
-  // --- INITIALIZATION ---
   function init() {
-    bgCanvas = document.getElementById("bg-surface");
-    liveCanvas = document.getElementById("draw-surface");
-    toolbarEl = document.getElementById("toolbar");
-    
+    // 2. DOM REFS — data table
+    ([bgCanvas, liveCanvas, toolbarEl, zoomEl, rotEl, backBtn] =
+      ["bg-surface", "draw-surface", "toolbar", "zoom-indicator", "rotation-indicator", "back-btn"].map($));
+
     if (!bgCanvas || !liveCanvas || !toolbarEl) {
       return window.showError("HTML elements are missing. Did you update canvas.html?", "red");
     }
@@ -376,86 +406,73 @@
     liveCtx = liveCanvas.getContext("2d");
 
     function resize() {
-      const dpr = window.devicePixelRatio || 1;
-      const w = liveCanvas.clientWidth; const h = liveCanvas.clientHeight;
-      
-      liveCanvas.width = w * dpr; 
-      liveCanvas.height = h * dpr;
-      liveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-      bgCanvas.width = w * 1.4 * dpr; 
-      bgCanvas.height = h * 1.4 * dpr;
-      bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
+      const w = liveCanvas.clientWidth, h = liveCanvas.clientHeight;
+      halfW = w / 2; halfH = h / 2;
+      resizeLayer(liveCanvas, liveCtx, w, h, 1.0);
+      resizeLayer(bgCanvas, bgCtx, w, h, 1.4);
       panBuffer = new window.PanBuffer(camera, bgCanvas);
       camera.markDirty();
       renderBackground();
     }
 
     window.addEventListener("resize", resize);
-    
     toolbar.wire(centerOnContent, () => camera.markDirty(), () => {});
-    
-    // LIBRARY BUTTON (RESTORED)
-    document.getElementById("back-btn").addEventListener("click", function () {
+
+    backBtn.addEventListener("click", () => {
       if (autosaver.isSaving || autosaver.pendingData) {
         window.showError("Saving... please wait.", "orange");
-        setTimeout(function() { window.location.href = "index.html"; }, 500);
+        setTimeout(() => { window.location.href = "index.html"; }, 500);
       } else {
         window.location.href = "index.html";
       }
     });
 
-    liveCanvas.addEventListener("pointerdown", penDown);
-    liveCanvas.addEventListener("pointermove", penMove);
-    liveCanvas.addEventListener("pointerup", penUp);
-    
-    liveCanvas.addEventListener("touchstart", touchStart, { passive: true });
-    liveCanvas.addEventListener("touchmove", touchMove, { passive: false });
-    liveCanvas.addEventListener("touchend", touchEnd, { passive: true });
+    // 3. EVENT LISTENERS — data table
+    [
+      ["pointerdown", penDown],
+      ["pointermove", penMove],
+      ["pointerup", penUp],
+      ["touchstart", touchStart, { passive: true }],
+      ["touchmove", touchMove, { passive: false }],
+      ["touchend", touchEnd, { passive: true }]
+    ].forEach(([evt, fn, opts]) => liveCanvas.addEventListener(evt, fn, opts));
 
-    const params = new URLSearchParams(window.location.search);
-    const id = params.get("id");
+    const id = new URLSearchParams(window.location.search).get("id");
     if (!id) return window.showError("No canvas ID provided.", "red");
 
     Store.get(id).then((data) => {
       canvasData = data;
       if (!canvasData.strokes) canvasData.strokes = [];
-      
-      const treeSize = 1000000;
-      strokeTree = new QuadTree({ x: -treeSize/2, y: -treeSize/2, w: treeSize, h: treeSize }, 10, 5, 0);
-      canvasData.strokes.forEach((s) => {
-        if (s.points.length > 0 && s.bounds) strokeTree.insert(s);
-      });
-
-      document.getElementById("canvas-title").textContent = data.title || "Untitled";
+      const S = 1000000;
+      strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S }, 10, 5, 0);
+      for (const s of canvasData.strokes) if (s.points.length > 0 && s.bounds) strokeTree.insert(s);
+      $("canvas-title").textContent = data.title || "Untitled";
       centerOnContent();
       updateIndicators();
       resize();
-    }).catch((err) => {
-      window.showError("Database error: " + err, "red");
-    });
+    }).catch((err) => window.showError("Database error: " + err, "red"));
   }
 
   function centerOnContent() {
     if (!canvasData || canvasData.strokes.length === 0) return;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    canvasData.strokes.forEach((s) => {
-      (s.points || []).forEach((p) => {
-        if (p.x < minX) minX = p.x; if (p.y < minY) minY = p.y;
-        if (p.x > maxX) maxX = p.x; if (p.y > maxY) maxY = p.y;
-      });
-    });
-    if (isFinite(minX)) {
-      camera.x = (minX + maxX) / 2; 
-      camera.y = (minY + maxY) / 2;
-      camera.rotation = 0; 
-      camera.scale = Math.min(1000 / (maxX - minX + 400), 800 / (maxY - minY + 400));
-      camera.markDirty();
-      if (panBuffer) panBuffer.reset();
-      renderBackground();
-      updateIndicators();
+
+    for (const s of canvasData.strokes) {
+      const b = strokeBounds(s);
+      if (!b) continue;
+      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
+      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
     }
+
+    if (!isFinite(minX)) return;
+    camera.x = (minX + maxX) / 2;
+    camera.y = (minY + maxY) / 2;
+    camera.rotation = 0;
+    camera.scale = CLAMP_SCALE(Math.min(1000 / (maxX - minX + 400), 800 / (maxY - minY + 400)));
+    camera.markDirty();
+    if (panBuffer) panBuffer.reset();
+    renderBackground();
+    updateIndicators();
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
