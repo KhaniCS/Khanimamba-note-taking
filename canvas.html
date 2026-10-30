@@ -9,18 +9,31 @@
   <link rel="stylesheet" href="canvas-styles.css">
   
   <script>
-    function showError(msg) {
+    // AGGRESSIVE ERROR CATCHER
+    function showError(msg, color) {
       var d = document.createElement("div");
-      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:red;color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;";
+      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:" + (color || "red") + ";color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;box-shadow:0 4px 6px rgba(0,0,0,0.3);";
       d.textContent = "CRASH: " + msg;
       document.body.appendChild(d);
     }
-    window.showError = showError;
+    
+    // Catch JS errors
+    window.onerror = function(msg, url, line) {
+      showError(msg + " at " + (url ? url.split('/').pop() : "unknown") + ":" + line, "red");
+      return false;
+    };
+
+    // Catch missing scripts/CSS
     window.addEventListener('error', function(e) {
-      showError(e.message + " in " + (e.filename || "unknown file"));
+      if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+        var file = (e.target.src || e.target.href).split('/').pop();
+        showError("FILE NOT FOUND: " + file, "orange");
+      }
     }, true);
+
+    // Catch Promise rejections
     window.addEventListener('unhandledrejection', function(e) {
-      showError("Database/Async error: " + e.reason);
+      showError("Async Error: " + e.reason, "purple");
     });
   </script>
 </head>
