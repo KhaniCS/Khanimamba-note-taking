@@ -1,99 +1,102 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="Inkloom">
-  <title>Inkloom Canvas</title>
-  <link rel="stylesheet" href="canvas-styles.css">
-  
-  <script>
-    // AGGRESSIVE ERROR CATCHER
-    function showError(msg, color) {
-      var d = document.createElement("div");
-      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:" + (color || "red") + ";color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;box-shadow:0 4px 6px rgba(0,0,0,0.3);";
-      d.textContent = "CRASH: " + msg;
-      document.body.appendChild(d);
-    }
-    
-    // Catch JS errors
-    window.onerror = function(msg, url, line) {
-      showError(msg + " at " + (url ? url.split('/').pop() : "unknown") + ":" + line, "red");
-      return false;
-    };
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Inkloom">
+<title>Inkloom Canvas</title>
+<link rel="stylesheet" href="canvas-styles.css?v=3">
+<script>
+// AGGRESSIVE ERROR CATCHER
+function showError(msg, color) {
+  var d = document.createElement("div");
+  d.style.cssText = "position:fixed;top:0;left:0;right:0;background:" + (color || "red") + ";color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;box-shadow:0 4px 6px rgba(0,0,0,0.3);";
+  d.textContent = "CRASH: " + msg;
+  document.body.appendChild(d);
+}
 
-    // Catch missing scripts/CSS
-    window.addEventListener('error', function(e) {
-      if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
-        var file = (e.target.src || e.target.href).split('/').pop();
-        showError("FILE NOT FOUND: " + file, "orange");
-      }
-    }, true);
+// Catch JS errors
+window.onerror = function(msg, url, line) {
+  showError(msg + " at " + (url ? url.split('/').pop() : "unknown") + ":" + line, "red");
+  return false;
+};
 
-    // Catch Promise rejections
-    window.addEventListener('unhandledrejection', function(e) {
-      showError("Async Error: " + e.reason, "purple");
-    });
-  </script>
+// Catch missing scripts/CSS
+window.addEventListener('error', function(e) {
+  if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
+    var file = (e.target.src || e.target.href).split('/').pop();
+    showError("FILE NOT FOUND: " + file, "orange");
+  }
+}, true);
+
+// Catch Promise rejections
+window.addEventListener('unhandledrejection', function(e) {
+  showError("Async Error: " + e.reason, "purple");
+});
+</script>
 </head>
 <body oncontextmenu="return false;" onselectstart="return false;">
-  <header id="canvas-header">
-    <button id="back-btn" type="button">‹ Library</button>
-    <h1 id="canvas-title">Canvas</h1>
-    <div style="width: 60px;"></div>
-  </header>
 
-  <div id="toolbar">
-    <button id="lost-btn" class="tool-btn wide" type="button">LOST</button>
-    <div class="divider"></div>
-    <div class="tool-group">
-      <button class="tool-btn active" data-tool="pen" type="button">✎</button>
-      <button class="tool-btn" data-tool="eraser" type="button">⌫</button>
-    </div>
-    <div class="divider"></div>
-    <button id="rotate-lock-btn" class="tool-btn wide" type="button">ROT 🔓</button>
-    <button id="zoom-lock-btn" class="tool-btn wide" type="button">ZOOM 🔓</button>
-    <div class="divider"></div>
-    <div class="size-group">
-      <button class="size-btn" data-size="2" type="button">2</button>
-      <button class="size-btn active" data-size="4" type="button">4</button>
-      <button class="size-btn" data-size="8" type="button">8</button>
-      <button class="size-btn" data-size="20" type="button">20</button>
-    </div>
-    <div class="divider"></div>
-    <div class="color-group">
-      <button class="color-btn active" data-color="#1a1a2e" style="background:#1a1a2e;" type="button"></button>
-      <button class="color-btn" data-color="#ff3b30" style="background:#ff3b30;" type="button"></button>
-      <button class="color-btn" data-color="#007aff" style="background:#007aff;" type="button"></button>
-      <button class="color-btn" data-color="#34c759" style="background:#34c759;" type="button"></button>
-      <button class="color-btn" data-color="#ff9500" style="background:#ff9500;" type="button"></button>
-      <button class="color-btn" data-color="#af52de" style="background:#af52de;" type="button"></button>
+<header id="canvas-header">
+  <button id="back-btn" type="button">‹ Library</button>
+  <h1 id="canvas-title">Canvas</h1>
+  <div style="width: 60px;"></div>
+</header>
+
+<div id="toolbar">
+  <button id="lost-btn" class="tool-btn wide" type="button">LOST</button>
+  <div class="divider"></div>
+  <div class="tool-group">
+    <button class="tool-btn active" data-tool="pen" type="button">✎</button>
+    <button class="tool-btn" data-tool="eraser" type="button">⌫</button>
+  </div>
+  <div class="divider"></div>
+  <button id="rotate-lock-btn" class="tool-btn wide" type="button">ROT 🔓</button>
+  <button id="zoom-lock-btn" class="tool-btn wide" type="button">ZOOM 🔓</button>
+  <div class="divider"></div>
+  <div class="size-group">
+    <button class="size-btn" data-size="2" type="button">2</button>
+    <button class="size-btn active" data-size="4" type="button">4</button>
+    <button class="size-btn" data-size="8" type="button">8</button>
+    <button class="size-btn" data-size="20" type="button">20</button>
+  </div>
+  <div class="divider"></div>
+  <div class="color-group">
+    <button class="color-btn active" data-color="#1a1a2e" style="background:#1a1a2e;" type="button"></button>
+    <button class="color-btn" data-color="#ff3b30" style="background:#ff3b30;" type="button"></button>
+    <button class="color-btn" data-color="#007aff" style="background:#007aff;" type="button"></button>
+    <button class="color-btn" data-color="#34c759" style="background:#34c759;" type="button"></button>
+    <button class="color-btn" data-color="#ff9500" style="background:#ff9500;" type="button"></button>
+    <button class="color-btn" data-color="#af52de" style="background:#af52de;" type="button"></button>
+  </div>
+</div>
+
+<div id="bottom-indicators">
+  <div id="zoom-indicator">100%</div>
+  <div id="rotation-indicator">0°</div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="bg-surface"></canvas>
+  <canvas id="draw-surface"></canvas>
+  <div id="saving-overlay">
+    <div class="glass-card">
+      <div class="spinner"></div>
+      Saving...
     </div>
   </div>
+</div>
 
-  <div id="bottom-indicators">
-    <div id="zoom-indicator">100%</div>
-    <div id="rotation-indicator">0°</div>
-  </div>
+<!-- Bump the ?v= number whenever you change a file, so browsers never serve a stale copy. -->
+<!-- geo.js must come before camera.js (the camera uses it). -->
+<script src="store.js?v=3"></script>
+<script src="geo.js?v=3"></script>
+<script src="camera.js?v=3"></script>
+<script src="panbuffer.js?v=3"></script>
+<script src="toolbar.js?v=3"></script>
+<script src="autosaver.js?v=3"></script>
+<script src="canvas.js?v=3"></script>
 
-  <div id="canvas-wrap">
-    <canvas id="bg-surface"></canvas>
-    <canvas id="draw-surface"></canvas>
-    
-    <div id="saving-overlay">
-      <div class="glass-card">
-        <div class="spinner"></div>
-        Saving...
-      </div>
-    </div>
-  </div>
-  
-  <script src="store.js"></script>
-  <script src="camera.js"></script>
-  <script src="panbuffer.js"></script>
-  <script src="toolbar.js"></script>
-  <script src="autosaver.js"></script>
-  <script src="canvas.js"></script>
 </body>
 </html>
