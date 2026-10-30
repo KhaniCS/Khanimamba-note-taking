@@ -181,8 +181,10 @@
         const p = firstTouch(e, rect);
         const dx = p.x - g.lastX;
         const dy = p.y - g.lastY;
-        flushPanBuffer(dx, dy);
+        // FIX: move the camera first, so if the pan buffer needs a re-render
+        // it draws at the up-to-date camera position (no one-frame lag/offset).
         camera.pan(dx, dy);
+        flushPanBuffer(dx, dy);
         return Gesture.pan.start(p);
       },
       end(g, e) { return continueAsPendingPanIfOneTouch(e); }
@@ -345,6 +347,11 @@
   }
 
   function renderBackground() {
+    // FIX: a freshly drawn background is already at the correct position, so any
+    // leftover CSS pan offset must be cleared or the whole drawing appears shifted
+    // (e.g. after lifting the pen following a small pan).
+    if (panBuffer) panBuffer.reset();
+
     const { w, h } = bgSize();
     const cx = w / 2, cy = h / 2;
 
