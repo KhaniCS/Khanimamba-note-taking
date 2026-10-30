@@ -52,7 +52,12 @@
     return a;
   }
 
-  const currentRect = () => liveCanvas.getBoundingClientRect();
+  // PERF: getBoundingClientRect() forces the browser to recalculate layout. Doing it
+  // on every touchmove (right after we changed a CSS transform) is very expensive,
+  // so we cache it and only refresh at the start of a gesture / on resize.
+  let cachedRect = null;
+  const currentRect = () => cachedRect || (cachedRect = liveCanvas.getBoundingClientRect());
+  const invalidateRect = () => { cachedRect = null; };
   const liveSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
   const bgSize = () => ({ w: bgCanvas.width / DPR(), h: bgCanvas.height / DPR() });
 
@@ -147,16 +152,42 @@
   function saveStroke(stroke) {
     if (!canvasData) return;
     stroke.bounds = strokeBounds(stroke);
+    stroke._z = canvasData.strokes.length; // draw order, used when sorting visible strokes
     canvasData.strokes.push(stroke);
     if (strokeTree) strokeTree.insert(stroke);
     autosaver.schedule(canvasData);
   }
 
   function flushPanBuffer(dx, dy) {
-    if (panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight)) {
-      panBuffer.reset();
-      renderBackground();
+    // PERF: use the cached size (halfW/halfH come from resize()) instead of
+    // reading clientWidth/clientHeight, which forces a layout on every move.
+    if (panBuffer.addDelta(dx, dy, halfW * 2, halfH * 2)) {
+      renderBackground(); // renderBackground() also resets the pan buffer offset
     }
+  }
+
+  // PERF: touch events can arrive faster than the screen refreshes (especially on
+  // 120Hz iPads). Instead of moving the camera on every event, we add the movement
+  // up and apply it once per animation frame.
+  let pendingPanDx = 0, pendingPanDy = 0, panFrameScheduled = false;
+
+  function applyPendingPan() {
+    if (pendingPanDx === 0 && pendingPanDy === 0) return;
+    const dx = pendingPanDx, dy = pendingPanDy;
+    pendingPanDx = 0; pendingPanDy = 0;
+    camera.pan(dx, dy);
+    flushPanBuffer(dx, dy);
+  }
+
+  function queuePan(dx, dy) {
+    pendingPanDx += dx;
+    pendingPanDy += dy;
+    if (panFrameScheduled) return;
+    panFrameScheduled = true;
+    requestAnimationFrame(() => {
+      panFrameScheduled = false;
+      applyPendingPan();
+    });
   }
 
   function continueAsPendingPanIfOneTouch(e) {
@@ -179,19 +210,18 @@
       start(p) { return { type: "pan", lastX: p.x, lastY: p.y }; },
       move(g, e, rect) {
         const p = firstTouch(e, rect);
-        const dx = p.x - g.lastX;
-        const dy = p.y - g.lastY;
-        // FIX: move the camera first, so if the pan buffer needs a re-render
-        // it draws at the up-to-date camera position (no one-frame lag/offset).
-        camera.pan(dx, dy);
-        flushPanBuffer(dx, dy);
+        queuePan(p.x - g.lastX, p.y - g.lastY);
         return Gesture.pan.start(p);
       },
-      end(g, e) { return continueAsPendingPanIfOneTouch(e); }
+      end(g, e) {
+        applyPendingPan(); // don't lose the last bit of movement
+        return continueAsPendingPanIfOneTouch(e);
+      }
     },
 
     pinch: {
       start(t0, t1, rect) {
+        applyPendingPan(); // finish any queued pan before the camera is snapshotted
         const a = analyzeTwoTouches(t0, t1, rect);
         return {
           type: "pinch",
@@ -363,8 +393,25 @@
     drawGrid(bgCtx, bounds);
 
     if (canvasData) {
-      const visible = strokeTree ? strokeTree.retrieve(bounds) : canvasData.strokes;
-      for (const s of visible) drawStrokeOn(bgCtx, s);
+      // The quad tree only narrows things down roughly: strokes that cross a tree
+      // boundary (e.g. anything over the origin) are always returned. So we also do
+      // an exact bounding-box test, and skip strokes that are completely off-screen.
+      // PERF: this is the biggest saving when re-rendering during a pan.
+      let visible = strokeTree ? strokeTree.retrieve(bounds) : canvasData.strokes;
+      if (strokeTree) {
+        // The tree returns strokes in tree order, not drawing order. Sort back to
+        // the order they were drawn in, otherwise erasers can land on the wrong layer.
+        visible = visible.slice().sort((p, q) => p._z - q._z);
+      }
+      for (const s of visible) {
+        const sb = s.bounds;
+        if (sb) {
+          const pad = (s.width || 4) / 2;
+          if (sb.maxX + pad < bounds.minX || sb.minX - pad > bounds.maxX ||
+              sb.maxY + pad < bounds.minY || sb.minY - pad > bounds.maxY) continue;
+        }
+        drawStrokeOn(bgCtx, s);
+      }
     }
   }
 
@@ -399,6 +446,8 @@
 
   // --- PEN HANDLERS ---
   function penDown(e) {
+    invalidateRect();
+    applyPendingPan(); // make sure the camera is up to date before we snapshot it
     const p = getPenPoint(e);
     if (!p) return;
 
@@ -463,6 +512,7 @@
 
   function touchStart(e) {
     if (isPenActive) return;
+    invalidateRect();
     const rect = currentRect();
     if (e.touches.length === 1) {
       touchCtx.gesture = Gesture.pending_pan.start(firstTouch(e, rect));
@@ -486,6 +536,7 @@
     liveCtx = liveCanvas.getContext("2d");
 
     function resize() {
+      invalidateRect();
       const { w, h } = liveSize();
       halfW = w / 2; halfH = h / 2;
       resizeLayer(liveCanvas, liveCtx, w, h, 1.0);
@@ -527,6 +578,9 @@
       const S = 1000000;
       strokeTree = new QuadTree({ x: -S / 2, y: -S / 2, w: S, h: S });
 
+      // Remember the original drawing order of every stroke
+      canvasData.strokes.forEach((s, i) => { s._z = i; });
+
       // FIX: rebuild missing bounds so older strokes are still drawn
       for (const s of canvasData.strokes) {
         if (!hasPoints(s)) continue;
@@ -549,6 +603,8 @@
     const agg = emptyBounds();
     for (const s of canvasData.strokes) mergeBounds(agg, strokeBounds(s));
     if (!isFinite(agg.minX)) return;
+
+    pendingPanDx = 0; pendingPanDy = 0; // discard stale queued movement
 
     camera.setPosition(
       (agg.minX + agg.maxX) / 2,
