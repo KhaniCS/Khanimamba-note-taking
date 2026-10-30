@@ -27,6 +27,21 @@
   const screenPoints = new Float32Array(MAX_POINTS * 2);
   let strokeOriginCamera = null;
 
+  // --- INDICATORS ---
+  function updateIndicators() {
+    const scale = camera.scale;
+    const zoomEl = document.getElementById("zoom-indicator");
+    const rotEl = document.getElementById("rotation-indicator");
+    
+    if (zoomEl) {
+      zoomEl.textContent = scale >= 0.01 ? Math.round(scale * 100) + "%" : scale.toExponential(1);
+    }
+    if (rotEl) {
+      const deg = Math.round(camera.rotation * 180 / Math.PI);
+      rotEl.textContent = deg + "°";
+    }
+  }
+
   // --- QUADTREE ---
   class QuadTree {
     constructor(bounds, maxObjects, maxLevels, level) {
@@ -72,6 +87,7 @@
   }
   let strokeTree = null;
 
+  // --- RENDERING LOGIC ---
   function drawGrid(c, w, h, cx, cy) {
     let spacing = 100;
     while (spacing * camera.scale < 30) spacing *= 2;
@@ -164,6 +180,7 @@
     });
   }
 
+  // --- INPUT HANDLING ---
   function penDown(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
@@ -238,6 +255,7 @@
     }
   }
 
+  // --- TOUCH (PAN & ZOOM) ---
   const touchCtx = { gesture: null };
 
   function touchStart(e) {
@@ -321,6 +339,7 @@
       camera.x = worldMid.x - (mdx * cosNeg - mdy * sinNeg) / newScale;
       camera.y = worldMid.y - (mdx * sinNeg + mdy * cosNeg) / newScale;
 
+      updateIndicators();
       renderBackground();
     }
   }
@@ -332,6 +351,7 @@
         camera.rotation = 0; 
         toolbar.rotationSnapHoldUntil = Date.now() + 1000; 
         camera.markDirty();
+        updateIndicators();
         panBuffer.reset(); 
         renderBackground();
       }
@@ -342,6 +362,7 @@
     }
   }
 
+  // --- INITIALIZATION ---
   function init() {
     bgCanvas = document.getElementById("bg-surface");
     liveCanvas = document.getElementById("draw-surface");
@@ -375,6 +396,16 @@
     
     toolbar.wire(centerOnContent, () => camera.markDirty(), () => {});
     
+    // LIBRARY BUTTON (RESTORED)
+    document.getElementById("back-btn").addEventListener("click", function () {
+      if (autosaver.isSaving || autosaver.pendingData) {
+        window.showError("Saving... please wait.", "orange");
+        setTimeout(function() { window.location.href = "index.html"; }, 500);
+      } else {
+        window.location.href = "index.html";
+      }
+    });
+
     liveCanvas.addEventListener("pointerdown", penDown);
     liveCanvas.addEventListener("pointermove", penMove);
     liveCanvas.addEventListener("pointerup", penUp);
@@ -399,6 +430,7 @@
 
       document.getElementById("canvas-title").textContent = data.title || "Untitled";
       centerOnContent();
+      updateIndicators();
       resize();
     }).catch((err) => {
       window.showError("Database error: " + err, "red");
@@ -422,6 +454,7 @@
       camera.markDirty();
       if (panBuffer) panBuffer.reset();
       renderBackground();
+      updateIndicators();
     }
   }
 
