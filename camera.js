@@ -1,6 +1,8 @@
 (function () {
   "use strict";
 
+  const { rotX, rotY } = window.Geo;
+
   class Camera {
     constructor() {
       this.x = 0;
@@ -15,6 +17,7 @@
 
       this.dirty = true;
       this.panDirty = true;
+
       this.cx = 0;
       this.cy = 0;
 
@@ -40,23 +43,29 @@
       return this._inv;
     }
 
+    // THE one place that turns a screen-space offset (pixels from the view centre,
+    // or a drag distance) into a world-space offset: undo the rotation, undo the zoom.
+    // Pan, zoom, toWorld and getVisibleBounds all use these two.
+    _worldDX(px, py) { const r = this._invRot(); return rotX(px, py, r.cos, r.sin) / this.scale; }
+    _worldDY(px, py) { const r = this._invRot(); return rotY(px, py, r.cos, r.sin) / this.scale; }
+
     pan(dx, dy) {
-      const r = this._invRot();
-      this.x -= (dx * r.cos - dy * r.sin) / this.scale;
-      this.y -= (dx * r.sin + dy * r.cos) / this.scale;
+      this.x -= this._worldDX(dx, dy);
+      this.y -= this._worldDY(dx, dy);
       this.markPanDirty();
     }
 
     zoomAt(sx, sy, newScale, newRot, cx, cy) {
       const worldMid = this.toWorld(sx, sy, cx, cy);
+
       this.scale = newScale;
       this.rotation = newRot;
       this.markDirty();
 
-      const r = this._invRot();
+      // keep the world point under the fingers fixed on screen
       const mdx = sx - cx, mdy = sy - cy;
-      this.x = worldMid.x - (mdx * r.cos - mdy * r.sin) / newScale;
-      this.y = worldMid.y - (mdx * r.sin + mdy * r.cos) / newScale;
+      this.x = worldMid.x - this._worldDX(mdx, mdy);
+      this.y = worldMid.y - this._worldDY(mdx, mdy);
     }
 
     updateMatrix(cx, cy) {
@@ -72,40 +81,38 @@
       }
 
       if (this.panDirty) {
-        this.tx = -this.x * this.a + this.y * this.b + this.cx;
-        this.ty = -this.x * this.b - this.y * this.a + this.cy;
+        // world origin of the camera -> view centre
+        this.tx = -rotX(this.x, this.y, this.a, this.b) + this.cx;
+        this.ty = -rotY(this.x, this.y, this.a, this.b) + this.cy;
         this.panDirty = false;
       }
     }
 
     toWorld(sx, sy, cx, cy) {
-      const r = this._invRot();
       const px = sx - cx, py = sy - cy;
       return {
-        x: (px * r.cos - py * r.sin) / this.scale + this.x,
-        y: (px * r.sin + py * r.cos) / this.scale + this.y
+        x: this._worldDX(px, py) + this.x,
+        y: this._worldDY(px, py) + this.y
       };
     }
 
     getVisibleBounds(w, h, cx, cy) {
-      const inv = 1 / this.scale;
-      const r = this._invRot();
-
       const corners = [
-        { x: -cx, y: -cy }, { x: w - cx, y: -cy },
-        { x: -cx, y: h - cy }, { x: w - cx, y: h - cy }
+        -cx, -cy,   w - cx, -cy,
+        -cx, h - cy, w - cx, h - cy
       ];
 
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (let i = 0; i < 4; i++) {
-        const c = corners[i];
-        const wx = this.x + (c.x * r.cos - c.y * r.sin) * inv;
-        const wy = this.y + (c.x * r.sin + c.y * r.cos) * inv;
+
+      for (let i = 0; i < 8; i += 2) {
+        const wx = this.x + this._worldDX(corners[i], corners[i + 1]);
+        const wy = this.y + this._worldDY(corners[i], corners[i + 1]);
         if (wx < minX) minX = wx;
         if (wx > maxX) maxX = wx;
         if (wy < minY) minY = wy;
         if (wy > maxY) maxY = wy;
       }
+
       return { minX, maxX, minY, maxY };
     }
   }
