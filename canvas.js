@@ -33,6 +33,9 @@
   const screenY = new Float32Array(MAX_POINTS);
   let screenCount = 0;
 
+  // NEW: how many points are already painted on the live canvas
+  let liveDrawnCount = 0;
+
   let halfW = 0;
   let halfH = 0;
 
@@ -115,7 +118,6 @@
     return spacing;
   }
 
-  // Uses _invRot() which now caches — so a batch call is 1 trig, not 2N
   function convertScreenPointsToWorld(stroke, camSnapshot) {
     const cos = Math.cos(-camSnapshot.rotation);
     const sin = Math.sin(-camSnapshot.rotation);
@@ -266,32 +268,24 @@
   }
   let strokeTree = null;
 
-  // --- RENDERING ---
-
-  // Grid: incremental — 2 adds per cell instead of 5 ops.
-  // Also uses one beginPath + one fill for the whole grid.
   function drawGrid(c, bounds) {
     const spacing = getGridSpacing();
     const { a, b, tx, ty } = camera;
     const startX = snap(bounds.minX, spacing);
     const startY = snap(bounds.minY, spacing);
 
-    // Pre-compute the per-step increments
     const stepX = -spacing * b;
     const stepY = spacing * a;
 
     c.fillStyle = "#d0d0d8";
     c.beginPath();
-
     for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
-      // Compute the first cell of this column
-      let screenX = wx * a - startY * b + tx;
-      let screenY = wx * b + startY * a + ty;
-
+      let sx = wx * a - startY * b + tx;
+      let sy = wx * b + startY * a + ty;
       for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
-        c.arc(screenX, screenY, 1.5, 0, Math.PI * 2);
-        screenX += stepX;
-        screenY += stepY;
+        c.arc(sx, sy, 1.5, 0, Math.PI * 2);
+        sx += stepX;
+        sy += stepY;
       }
     }
     c.fill();
@@ -349,26 +343,33 @@
     }
   }
 
-  let renderScheduled = false;
-  function redrawLive() {
-    if (renderScheduled) return;
-    renderScheduled = true;
+  // --- INCREMENTAL LIVE DRAW (the ink speed fix) ---
+  let liveDrawScheduled = false;
+  function scheduleIncrementalLiveDraw() {
+    if (liveDrawScheduled) return;
+    liveDrawScheduled = true;
     requestAnimationFrame(() => {
-      renderScheduled = false;
-      const { w, h } = liveSize();
-      liveCtx.clearRect(0, 0, w, h);
-      if (!currentStroke || screenCount === 0) return;
+      liveDrawScheduled = false;
+      if (!currentStroke || liveDrawnCount >= screenCount) return;
 
-      applyPenStyle(liveCtx, currentStroke, strokeScreenWidth(currentStroke));
+      // Draw ONLY the new segment(s). O(new) not O(total stroke).
       liveCtx.beginPath();
-      for (let i = 0; i < screenCount; i++) {
-        if (i === 0) liveCtx.moveTo(screenX[i], screenY[i]);
-        else liveCtx.lineTo(screenX[i], screenY[i]);
+      liveCtx.moveTo(screenX[liveDrawnCount - 1], screenY[liveDrawnCount - 1]);
+      for (let i = liveDrawnCount; i < screenCount; i++) {
+        liveCtx.lineTo(screenX[i], screenY[i]);
       }
       liveCtx.stroke();
+      liveDrawnCount = screenCount;
     });
   }
 
+  function clearLive() {
+    const { w, h } = liveSize();
+    liveCtx.clearRect(0, 0, w, h);
+    liveDrawnCount = 0;
+  }
+
+  // --- PEN HANDLERS ---
   function penDown(e) {
     const p = getPenPoint(e);
     if (!p) return;
@@ -381,9 +382,17 @@
       id: Store.uuid(), points: [], color: toolbar.currentColor,
       width: toolbar.currentSize / camera.scale, isEraser: toolbar.currentTool === "eraser", originScale: camera.scale
     };
+
     screenCount = 0;
     pushPoint(p.x, p.y);
-    redrawLive();
+
+    // Clear live canvas, set style once, draw the initial dot synchronously
+    clearLive();
+    applyPenStyle(liveCtx, currentStroke, strokeScreenWidth(currentStroke));
+    liveCtx.beginPath();
+    liveCtx.arc(p.x, p.y, liveCtx.lineWidth / 2, 0, Math.PI * 2);
+    liveCtx.fill();
+    liveDrawnCount = 1;
   }
 
   function penMove(e) {
@@ -395,7 +404,7 @@
     if (dx * dx + dy * dy < 2.25) return;
 
     pushPoint(p.x, p.y);
-    redrawLive();
+    scheduleIncrementalLiveDraw();
   }
 
   function penUp(e) {
@@ -407,7 +416,7 @@
       saveStroke(currentStroke);
       currentStroke = null;
       renderBackground();
-      redrawLive();
+      clearLive();
     }
   }
 
