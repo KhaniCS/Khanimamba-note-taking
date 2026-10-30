@@ -490,11 +490,25 @@
     togglePenMode(false);
 
     if (currentStroke && screenCount > 0) {
-      convertScreenPointsToWorld(currentStroke, strokeOriginCamera);
-      saveStroke(currentStroke);
+      const finished = currentStroke;
       currentStroke = null;
-      renderBackground();
-      clearLive();
+
+      convertScreenPointsToWorld(finished, strokeOriginCamera);
+      saveStroke(finished);
+
+      // PERF: paint ONLY the finished stroke onto the background, instead of
+      // clearing and redrawing the whole note. The cost no longer grows with how
+      // much ink is on the page.
+      //
+      // This deliberately does NOT call camera.updateMatrix(). camera.a/b/tx/ty
+      // still hold the matrix the background bitmap was last drawn with, and the
+      // bitmap is currently shown with the pan buffer's CSS offset on top. Drawing
+      // with that same matrix puts the stroke exactly where it already appears on
+      // screen, so there is no jump, even if you panned a little before drawing.
+      // The next full render (pan buffer overflow, zoom, etc.) redraws it from data.
+      drawStrokeOn(bgCtx, finished);
+
+      clearLive(); // same frame as the line above, so there is no flicker
     }
   }
 
