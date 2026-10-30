@@ -10,7 +10,6 @@
   const toolbar = new window.Toolbar();
   const autosaver = new window.AutoSaver(Store, 5000);
 
-  // --- CONSTANTS & EXTRACTED HELPERS ---
   const MIN_SCALE = 0.000000001;
   const MAX_SCALE = 1000000000;
   const CLAMP_SCALE = (v) => v < MIN_SCALE ? MIN_SCALE : v > MAX_SCALE ? MAX_SCALE : v;
@@ -19,7 +18,6 @@
   const $ = (id) => document.getElementById(id);
   const snap = (val, spacing) => Math.floor(val / spacing) * spacing;
   const DPR = () => window.devicePixelRatio || 1;
-  const canvasSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
 
   let bgCanvas, bgCtx, liveCanvas, liveCtx, toolbarEl, zoomEl, rotEl, backBtn;
 
@@ -60,6 +58,7 @@
   }
 
   const currentRect = () => liveCanvas.getBoundingClientRect();
+  const canvasSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
 
   function localPoint(touch, rect) {
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
@@ -67,10 +66,6 @@
 
   function getPenPoint(e) {
     return isPen(e) ? localPoint(e, currentRect()) : null;
-  }
-
-  function beginPendingPan(touch, rect) {
-    return { type: "pending_pan", startX: touch.clientX - rect.left, startY: touch.clientY - rect.top };
   }
 
   function analyzeTwoTouches(t0, t1, rect) {
@@ -160,13 +155,83 @@
     autosaver.schedule(canvasData);
   }
 
-  // NEW: extracts the "query visible strokes" block
   function getVisibleStrokes(w, h, cx, cy) {
     if (!canvasData) return [];
     const bounds = camera.getVisibleBounds(w, h, cx, cy);
     return strokeTree ? strokeTree.retrieve(bounds) : canvasData.strokes;
   }
 
+  // --- GESTURE STATE MACHINE ---
+  // Each gesture owns its own start/move/end. No more if/else chains.
+  const Gesture = {
+    pending_pan: {
+      start(p) { return { type: "pending_pan", startX: p.x, startY: p.y }; },
+      move(g, e, rect) {
+        const p = localPoint(e.touches[0], rect);
+        if ((p.x - g.startX) ** 2 + (p.y - g.startY) ** 2 > 225) {
+          return Gesture.pan.start(p);
+        }
+        return g;
+      },
+      end() { return null; }
+    },
+    pan: {
+      start(p) { return { type: "pan", lastX: p.x, lastY: p.y }; },
+      move(g, e, rect) {
+        const p = localPoint(e.touches[0], rect);
+        const dx = p.x - g.lastX, dy = p.y - g.lastY;
+        if (panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight)) {
+          panBuffer.reset();
+          renderBackground();
+        }
+        camera.pan(dx, dy);
+        return Gesture.pan.start(p);
+      },
+      end(g, e) {
+        if (e.touches.length === 1) {
+          return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
+        }
+        return null;
+      }
+    },
+    pinch: {
+      start(t0, t1, rect) {
+        const a = analyzeTwoTouches(t0, t1, rect);
+        return {
+          type: "pinch",
+          startDist: a.dist, startAngle: a.angle,
+          startScale: camera.scale, startRotation: camera.rotation,
+          startMid: { x: a.midX, y: a.midY }
+        };
+      },
+      move(g, e, rect) {
+        panBuffer.reset();
+        const a = analyzeTwoTouches(e.touches[0], e.touches[1], rect);
+        const newScale = toolbar.zoomLocked ? g.startScale : CLAMP_SCALE(g.startScale * (a.dist / g.startDist));
+        const newRot = (!toolbar.rotationLocked && Date.now() >= toolbar.rotationSnapHoldUntil)
+          ? g.startRotation + (a.angle - g.startAngle)
+          : g.startRotation;
+        camera.zoomAt(a.midX, a.midY, newScale, newRot, halfW, halfH);
+        updateIndicators();
+        renderBackground();
+        return g;
+      },
+      end(g, e) {
+        if (!toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
+          camera.rotation = 0;
+          toolbar.rotationSnapHoldUntil = Date.now() + 1000;
+          camera.markDirty();
+          refreshUI();
+        }
+        if (e.touches.length === 1) {
+          return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
+        }
+        return null;
+      }
+    }
+  };
+
+  // --- QUADTREE ---
   class QuadTree {
     constructor(bounds, maxObjects = 10, maxLevels = 4, level = 0) {
       this.bounds = bounds; this.maxObjects = maxObjects; this.maxLevels = maxLevels; this.level = level;
@@ -217,6 +282,7 @@
   }
   let strokeTree = null;
 
+  // --- RENDERING ---
   function drawGrid(c, w, h, cx, cy) {
     const spacing = getGridSpacing();
     const bounds = camera.getVisibleBounds(w, h, cx, cy);
@@ -266,7 +332,6 @@
     bgCtx.clearRect(0, 0, w, h);
     drawGrid(bgCtx, w, h, cx, cy);
 
-    // NEW: uses getVisibleStrokes helper
     for (const s of getVisibleStrokes(w, h, cx, cy)) drawStrokeOn(bgCtx, s);
   }
 
@@ -290,6 +355,7 @@
     });
   }
 
+  // --- PEN HANDLERS ---
   function penDown(e) {
     const p = getPenPoint(e);
     if (!p) return;
@@ -332,84 +398,37 @@
     }
   }
 
+  // --- TOUCH HANDLERS (DISPATCH ONLY) ---
   const touchCtx = { gesture: null };
 
   function touchStart(e) {
     if (isPenActive) return;
     const rect = currentRect();
-
     if (e.touches.length === 1) {
-      touchCtx.gesture = beginPendingPan(e.touches[0], rect);
+      touchCtx.gesture = Gesture.pending_pan.start(localPoint(e.touches[0], rect));
     } else if (e.touches.length === 2) {
-      const a = analyzeTwoTouches(e.touches[0], e.touches[1], rect);
-      touchCtx.gesture = {
-        type: "pinch",
-        startDist: a.dist, startAngle: a.angle,
-        startScale: camera.scale, startRotation: camera.rotation,
-        startMid: { x: a.midX, y: a.midY }
-      };
+      touchCtx.gesture = Gesture.pinch.start(e.touches[0], e.touches[1], rect);
     }
   }
 
   function touchMove(e) {
     if (isPenActive || !touchCtx.gesture) return;
     e.preventDefault();
-    const rect = currentRect();
-
-    // NEW: hoisted localPoint for the two 1-touch branches
-    if (e.touches.length === 1 && (touchCtx.gesture.type === "pending_pan" || touchCtx.gesture.type === "pan")) {
-      const p = localPoint(e.touches[0], rect);
-
-      if (touchCtx.gesture.type === "pending_pan") {
-        if ((p.x - touchCtx.gesture.startX) ** 2 + (p.y - touchCtx.gesture.startY) ** 2 > 225) {
-          touchCtx.gesture = { type: "pan", lastX: p.x, lastY: p.y };
-        }
-        return;
-      }
-
-      const dx = p.x - touchCtx.gesture.lastX;
-      const dy = p.y - touchCtx.gesture.lastY;
-
-      if (panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight)) {
-        panBuffer.reset();
-        renderBackground();
-      }
-
-      camera.pan(dx, dy);
-      touchCtx.gesture.lastX = p.x;
-      touchCtx.gesture.lastY = p.y;
-    } else if (touchCtx.gesture.type === "pinch" && e.touches.length >= 2) {
-      panBuffer.reset();
-      const a = analyzeTwoTouches(e.touches[0], e.touches[1], rect);
-
-      const g = touchCtx.gesture;
-      const newScale = toolbar.zoomLocked ? g.startScale : CLAMP_SCALE(g.startScale * (a.dist / g.startDist));
-      const newRot = (!toolbar.rotationLocked && Date.now() >= toolbar.rotationSnapHoldUntil)
-        ? g.startRotation + (a.angle - g.startAngle)
-        : g.startRotation;
-
-      camera.zoomAt(a.midX, a.midY, newScale, newRot, halfW, halfH);
-      updateIndicators();
-      renderBackground();
+    const handler = Gesture[touchCtx.gesture.type];
+    if (handler && handler.move) {
+      touchCtx.gesture = handler.move(touchCtx.gesture, e, currentRect()) || touchCtx.gesture;
     }
   }
 
   function touchEnd(e) {
     if (isPenActive || !touchCtx.gesture) return;
-
-    if (e.touches.length === 0) {
-      if (touchCtx.gesture.type === "pinch" && !toolbar.rotationLocked && Math.abs(camera.rotation) < 5 * Math.PI / 180) {
-        camera.rotation = 0;
-        toolbar.rotationSnapHoldUntil = Date.now() + 1000;
-        camera.markDirty();
-        refreshUI();
-      }
-      touchCtx.gesture = null;
-    } else if (e.touches.length === 1 && touchCtx.gesture.type === "pinch") {
-      touchCtx.gesture = beginPendingPan(e.touches[0], currentRect());
+    const handler = Gesture[touchCtx.gesture.type];
+    if (handler && handler.end) {
+      touchCtx.gesture = handler.end(touchCtx.gesture, e);
     }
   }
 
+  // --- INIT ---
   function init() {
     ([bgCanvas, liveCanvas, toolbarEl, zoomEl, rotEl, backBtn] =
       ["bg-surface", "draw-surface", "toolbar", "zoom-indicator", "rotation-indicator", "back-btn"].map($));
