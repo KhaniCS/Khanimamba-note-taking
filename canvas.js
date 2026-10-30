@@ -13,9 +13,6 @@
   let canvasEl = null;
   let toolbarEl = null;
   let dpr = window.devicePixelRatio || 1;
-  let bgCanvas = null;
-  let bgCtx = null;
-  let bgDirty = true;
 
   const MIN_SCALE = 0.000000001;
   const MAX_SCALE = 1000000000;
@@ -34,12 +31,15 @@
   let rotationSnapHoldUntil = 0;
   let zoomLocked = false;
 
-  // --- SAVE TIMERS ---
-  let saveTimer = null;
+  // --- THE STATE FLAG (Replaces DOM listener churn) ---
+  let isPenActive = false;
 
-  // --- PEN STATE ---
-  let lastScreenPoint = null;
-  let screenPoints = [];
+  // --- TYPED ARRAYS (Zero Object Allocation) ---
+  const MAX_SCREEN_POINTS = 50000;
+  const screenPoints = new Float32Array(MAX_SCREEN_POINTS * 2);
+  let screenPointCount = 0;
+
+  let saveTimer = null;
   let strokeOriginCamera = null;
 
   // --- QUADTREE ---
@@ -170,14 +170,10 @@
     document.getElementById("rotation-indicator").textContent = deg + "°";
   }
 
-  function invalidateBackground() { bgDirty = true; }
-
   function setupCanvas() {
     canvasEl = document.getElementById("draw-surface");
     toolbarEl = document.getElementById("toolbar");
     ctx = canvasEl.getContext("2d");
-    bgCanvas = document.createElement("canvas");
-    bgCtx = bgCanvas.getContext("2d");
     resize();
     window.addEventListener("resize", resize);
   }
@@ -188,7 +184,6 @@
     canvasEl.width = Math.round(rect.width * dpr);
     canvasEl.height = Math.round(rect.height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    invalidateBackground();
     redraw();
   }
 
@@ -201,16 +196,14 @@
 
     c.save();
     c.fillStyle = "#d0d0d8";
-    const halfDiag = Math.sqrt(w * w + h * h) / 2 / camera.scale;
-    const viewLeft = camera.x - halfDiag;
-    const viewRight = camera.x + halfDiag;
-    const viewTop = camera.y - halfDiag;
-    const viewBottom = camera.y + halfDiag;
-
-    const startX = Math.floor(viewLeft / spacing) * spacing;
-    const startY = Math.floor(viewTop / spacing) * spacing;
-    for (let wx = startX; wx <= viewRight; wx += spacing) {
-      for (let wy = startY; wy <= viewBottom; wy += spacing) {
+    
+    // Get AABB for grid rendering too
+    const bounds = getViewportAABB();
+    const startX = Math.floor(bounds.minX / spacing) * spacing;
+    const startY = Math.floor(bounds.minY / spacing) * spacing;
+    
+    for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
+      for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
         const s = worldToScreen(wx, wy);
         c.beginPath();
         c.arc(s.x, s.y, 1.5, 0, Math.PI * 2);
@@ -253,33 +246,23 @@
     c.restore();
   }
 
-  function renderBackground() {
-    if (!bgDirty) return;
-    bgCanvas.width = canvasEl.width;
-    bgCanvas.height = canvasEl.height;
-    bgCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    bgCtx.clearRect(0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
-    drawGrid(bgCtx);
-    
-    if (canvasData) {
-      const w = canvasEl.clientWidth;
-      const h = canvasEl.clientHeight;
-      const halfDiag = Math.sqrt(w * w + h * h) / 2 / camera.scale;
-      const queryBox = { minX: camera.x - halfDiag, maxX: camera.x + halfDiag, minY: camera.y - halfDiag, maxY: camera.y + halfDiag };
-      const visibleStrokes = strokeTree ? strokeTree.retrieve(queryBox) : canvasData.strokes;
-
-      for (let i = 0; i < visibleStrokes.length; i++) {
-        const s = visibleStrokes[i];
-        if (s.points.length > 0) {
-          const originScale = s.originScale || 1.0;
-          if (camera.scale < originScale * CULL_FACTOR) continue;
-        }
-        drawStrokeOn(bgCtx, s);
-      }
-    }
-    bgDirty = false;
+  // --- VIEWPORT AABB MATH (Fixes rotated QuadTree queries) ---
+  function getViewportAABB() {
+    const w = canvasEl.clientWidth;
+    const h = canvasEl.clientHeight;
+    const tl = screenToWorld(0, 0);
+    const tr = screenToWorld(w, 0);
+    const bl = screenToWorld(0, h);
+    const br = screenToWorld(w, h);
+    return {
+      minX: Math.min(tl.x, tr.x, bl.x, br.x),
+      maxX: Math.max(tl.x, tr.x, bl.x, br.x),
+      minY: Math.min(tl.y, tr.y, bl.y, br.y),
+      maxY: Math.max(tl.y, tr.y, bl.y, br.y)
+    };
   }
 
+  // --- SINGLE CANVAS RENDERING PIPELINE ---
   let renderScheduled = false;
   function redraw() {
     if (renderScheduled) return;
@@ -287,9 +270,45 @@
     requestAnimationFrame(function() {
       renderScheduled = false;
       if (!ctx) return;
-      renderBackground();
-      ctx.clearRect(0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
-      ctx.drawImage(bgCanvas, 0, 0, canvasEl.clientWidth, canvasEl.clientHeight);
+      
+      const w = canvasEl.clientWidth;
+      const h = canvasEl.clientHeight;
+      
+      ctx.clearRect(0, 0, w, h);
+      drawGrid(ctx);
+      
+      if (canvasData) {
+        const viewBox = getViewportAABB();
+        const visibleStrokes = strokeTree ? strokeTree.retrieve(viewBox) : canvasData.strokes;
+
+        for (let i = 0; i < visibleStrokes.length; i++) {
+          const s = visibleStrokes[i];
+          if (s.points.length > 0) {
+            const originScale = s.originScale || 1.0;
+            if (camera.scale < originScale * CULL_FACTOR) continue;
+          }
+          drawStrokeOn(ctx, s);
+        }
+      }
+      
+      // If a stroke is currently being drawn, draw it on top
+      if (gesture && gesture.type === "draw" && screenPointCount > 0) {
+        ctx.save();
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = currentStroke.isEraser ? "#fbfaf7" : currentStroke.color;
+        ctx.lineWidth = currentStroke.width * camera.scale;
+        ctx.beginPath();
+        
+        for (let i = 0; i < screenPointCount; i++) {
+          const sx = screenPoints[i * 2];
+          const sy = screenPoints[i * 2 + 1];
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+        ctx.restore();
+      }
     });
   }
 
@@ -309,7 +328,8 @@
     const overlay = document.getElementById("saving-overlay");
     if (overlay) overlay.classList.add("visible");
     
-    const snapshot = pendingSave;
+    // IMMUTABLE SNAPSHOT (Fixes the race condition)
+    const snapshot = JSON.parse(JSON.stringify(pendingSave));
     pendingSave = null;
     
     setTimeout(function() {
@@ -333,11 +353,7 @@
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
 
-    canvasEl.removeEventListener("touchstart", touchStart, { passive: true });
-    canvasEl.removeEventListener("touchmove", touchMove, { passive: false });
-    canvasEl.removeEventListener("touchend", touchEnd, { passive: true });
-    canvasEl.removeEventListener("touchcancel", touchEnd, { passive: true });
-
+    isPenActive = true; // State flag replaces DOM churn
     if (canvasEl.setPointerCapture) {
       try { canvasEl.setPointerCapture(e.pointerId); } catch (err) { }
     }
@@ -362,78 +378,60 @@
     };
     gesture = { type: "draw" };
 
-    lastScreenPoint = { x: sx, y: sy };
-    screenPoints = [{ x: sx, y: sy }];
+    // Reset Typed Array
+    screenPointCount = 0;
+    screenPoints[screenPointCount * 2] = sx;
+    screenPoints[screenPointCount * 2 + 1] = sy;
+    screenPointCount++;
 
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    ctx.strokeStyle = currentStroke.isEraser ? "#fbfaf7" : currentStroke.color;
-    ctx.fillStyle = currentStroke.isEraser ? "#fbfaf7" : currentStroke.color;
-    ctx.lineWidth = currentStroke.width * camera.scale;
-
-    ctx.beginPath();
-    ctx.arc(sx, sy, ctx.lineWidth / 2, 0, Math.PI * 2);
-    ctx.fill();
+    redraw();
   }
 
   function penMove(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     if (!currentStroke || !gesture || gesture.type !== "draw") return;
-    if (!lastScreenPoint) return;
+    if (screenPointCount >= MAX_SCREEN_POINTS) return;
 
     const rect = canvasEl.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
 
-    const dx = sx - lastScreenPoint.x;
-    const dy = sy - lastScreenPoint.y;
+    const lastX = screenPoints[(screenPointCount - 1) * 2];
+    const lastY = screenPoints[(screenPointCount - 1) * 2 + 1];
+
+    const dx = sx - lastX;
+    const dy = sy - lastY;
     if ((dx * dx) + (dy * dy) < 2.25) return;
 
-    ctx.beginPath();
-    ctx.moveTo(lastScreenPoint.x, lastScreenPoint.y);
-    ctx.lineTo(sx, sy);
-    ctx.stroke();
+    // Store in Typed Array (No object allocation)
+    screenPoints[screenPointCount * 2] = sx;
+    screenPoints[screenPointCount * 2 + 1] = sy;
+    screenPointCount++;
 
-    screenPoints.push({ x: sx, y: sy });
-    lastScreenPoint = { x: sx, y: sy };
+    redraw();
   }
 
   function penUp(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
 
+    isPenActive = false; // Release state flag
     if (canvasEl.releasePointerCapture) {
       try { canvasEl.releasePointerCapture(e.pointerId); } catch (err) { }
     }
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
-    canvasEl.addEventListener("touchstart", touchStart, { passive: true });
-    canvasEl.addEventListener("touchmove", touchMove, { passive: false });
-    canvasEl.addEventListener("touchend", touchEnd, { passive: true });
-    canvasEl.addEventListener("touchcancel", touchEnd, { passive: true });
-
     if (gesture && gesture.type === "draw" && currentStroke) {
-      const rect = canvasEl.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
-      
-      if (lastScreenPoint && (lastScreenPoint.x !== sx || lastScreenPoint.y !== sy)) {
-        ctx.beginPath();
-        ctx.moveTo(lastScreenPoint.x, lastScreenPoint.y);
-        ctx.lineTo(sx, sy);
-        ctx.stroke();
-        screenPoints.push({ x: sx, y: sy });
-      }
-
-      if (strokeOriginCamera && screenPoints.length > 0) {
+      // Deferred Math: Convert Float32Array back to World Points
+      if (strokeOriginCamera && screenPointCount > 0) {
         const c = strokeOriginCamera;
         const cos = Math.cos(-c.rotation);
         const sin = Math.sin(-c.rotation);
         const cx = canvasEl.clientWidth / 2;
         const cy = canvasEl.clientHeight / 2;
 
-        for (let i = 0; i < screenPoints.length; i++) {
-          const px = screenPoints[i].x - cx;
-          const py = screenPoints[i].y - cy;
+        for (let i = 0; i < screenPointCount; i++) {
+          const px = screenPoints[i * 2] - cx;
+          const py = screenPoints[i * 2 + 1] - cy;
           currentStroke.points.push({
             x: (px * cos - py * sin) / c.scale + c.x,
             y: (px * sin + py * cos) / c.scale + c.y
@@ -452,20 +450,19 @@
         currentStroke.bounds = { minX, minY, maxX, maxY };
         canvasData.strokes.push(currentStroke);
         if (strokeTree) strokeTree.insert(currentStroke);
-        drawStrokeOn(bgCtx, currentStroke);
         requestSave();
       }
 
       currentStroke = null;
       gesture = null;
-      lastScreenPoint = null;
-      screenPoints = [];
       strokeOriginCamera = null;
+      redraw();
     }
   }
 
   // --- 2. TOUCH INPUT ---
   function touchStart(e) {
+    if (isPenActive) return; // Immediate bail out
     if (gesture && gesture.type === "draw") return;
 
     const rect = canvasEl.getBoundingClientRect();
@@ -493,6 +490,7 @@
   }
 
   function touchMove(e) {
+    if (isPenActive) return; // Immediate bail out
     if (gesture && gesture.type === "draw") return;
     if (!gesture) return;
 
@@ -527,7 +525,6 @@
       camera.y -= (dx * sin + dy * cos) / camera.scale;
       gesture.lastX = localX;
       gesture.lastY = localY;
-      invalidateBackground();
       redraw();
     } else if (gesture.type === "pinch" && e.touches.length >= 2) {
       const t0 = e.touches[0];
@@ -542,7 +539,6 @@
       
       let newScale = gesture.startScale * ratio;
       
-      // ZOOM LOCK LOGIC
       if (!zoomLocked) {
         newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
       } else {
@@ -566,12 +562,12 @@
       camera.y = gesture.startWorld.y - (mdx * sinNeg + mdy * cosNeg) / newScale;
       
       updateIndicators();
-      invalidateBackground();
       redraw();
     }
   }
 
   function touchEnd(e) {
+    if (isPenActive) return; // Immediate bail out
     if (gesture && gesture.type === "draw") return;
     if (!gesture) return;
 
@@ -581,7 +577,6 @@
           camera.rotation = 0;
           rotationSnapHoldUntil = Date.now() + 1000;
           updateIndicators();
-          invalidateBackground();
         }
       }
       gesture = null;
@@ -616,7 +611,6 @@
       newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
       camera.scale = newScale;
       updateIndicators();
-      invalidateBackground();
       redraw();
     }
   }
