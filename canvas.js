@@ -1,10 +1,14 @@
 (function () {
   "use strict";
 
-  const Store = window.Store;
-  if (!Store) return;
+  // --- DEPENDENCY CHECKS (Fail loudly if a file is missing) ---
+  if (!window.Store) return window.showError("store.js is missing.", "orange");
+  if (!window.Camera) return window.showError("camera.js is missing. Did you create the file?", "orange");
+  if (!window.PanBuffer) return window.showError("panbuffer.js is missing. Did you create the file?", "orange");
+  if (!window.Toolbar) return window.showError("toolbar.js is missing. Did you create the file?", "orange");
+  if (!window.AutoSaver) return window.showError("autosaver.js is missing. Did you create the file?", "orange");
 
-  // --- OOP INITIALIZATION ---
+  const Store = window.Store;
   const camera = new window.Camera();
   const toolbar = new window.Toolbar();
   const autosaver = new window.AutoSaver(Store, 5000);
@@ -12,12 +16,10 @@
   let panBuffer = null;
   let canvasData = null;
 
-  // --- DOM ELEMENTS ---
   let bgCanvas = null, bgCtx = null;
   let liveCanvas = null, liveCtx = null;
   let toolbarEl = null;
 
-  // --- DRAWING STATE ---
   let currentStroke = null;
   let isPenActive = false;
   let screenPointCount = 0;
@@ -70,7 +72,6 @@
   }
   let strokeTree = null;
 
-  // --- RENDERING LOGIC ---
   function drawGrid(c, w, h, cx, cy) {
     let spacing = 100;
     while (spacing * camera.scale < 30) spacing *= 2;
@@ -124,7 +125,6 @@
     }
   }
 
-  // --- THE RENDER LOOP ---
   function renderBackground() {
     const w = bgCanvas.width / (window.devicePixelRatio || 1);
     const h = bgCanvas.height / (window.devicePixelRatio || 1);
@@ -164,7 +164,6 @@
     });
   }
 
-  // --- INPUT HANDLING ---
   function penDown(e) {
     if (e.pointerType !== "pen" && e.pointerType !== "mouse") return;
     e.preventDefault();
@@ -239,7 +238,6 @@
     }
   }
 
-  // --- TOUCH (PAN & ZOOM) ---
   const touchCtx = { gesture: null };
 
   function touchStart(e) {
@@ -280,7 +278,6 @@
       const localX = t.clientX - rect.left; const localY = t.clientY - rect.top;
       const dx = localX - touchCtx.gesture.lastX; const dy = localY - touchCtx.gesture.lastY;
       
-      // CSS PAN BUFFER
       const needsRender = panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight);
       
       const cos = Math.cos(-camera.rotation); const sin = Math.sin(-camera.rotation);
@@ -345,11 +342,15 @@
     }
   }
 
-  // --- INITIALIZATION ---
   function init() {
     bgCanvas = document.getElementById("bg-surface");
     liveCanvas = document.getElementById("draw-surface");
     toolbarEl = document.getElementById("toolbar");
+    
+    if (!bgCanvas || !liveCanvas || !toolbarEl) {
+      return window.showError("HTML elements are missing. Did you update canvas.html?", "red");
+    }
+
     bgCtx = bgCanvas.getContext("2d");
     liveCtx = liveCanvas.getContext("2d");
 
@@ -384,7 +385,7 @@
 
     const params = new URLSearchParams(window.location.search);
     const id = params.get("id");
-    if (!id) return;
+    if (!id) return window.showError("No canvas ID provided.", "red");
 
     Store.get(id).then((data) => {
       canvasData = data;
@@ -399,6 +400,8 @@
       document.getElementById("canvas-title").textContent = data.title || "Untitled";
       centerOnContent();
       resize();
+    }).catch((err) => {
+      window.showError("Database error: " + err, "red");
     });
   }
 
