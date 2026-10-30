@@ -1,7 +1,6 @@
 (function () {
   "use strict";
 
-  // 1. DEPENDENCY CHECK — data table
   const deps = ["Store", "Camera", "PanBuffer", "Toolbar", "AutoSaver"];
   const missingDep = deps.find(name => !window[name]);
   if (missingDep) return window.showError(missingDep.toLowerCase() + ".js is missing.", "orange");
@@ -36,13 +35,15 @@
   const _ptA = { x: 0, y: 0 };
   const _ptB = { x: 0, y: 0 };
   const _ptC = { x: 0, y: 0 };
-  const _inv = { cos: 1, sin: 0 };
 
   function projectToScreen(wx, wy, out) {
     const { a, b, tx, ty } = camera;
     out.x = wx * a - wy * b + tx;
     out.y = wx * b + wy * a + ty;
   }
+
+  // EXTRACTION: canvas rect, used 5×
+  const currentRect = () => liveCanvas.getBoundingClientRect();
 
   function localPoint(touch, rect) {
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
@@ -52,10 +53,17 @@
     return { type: "pending_pan", startX: touch.clientX - rect.left, startY: touch.clientY - rect.top };
   }
 
-  function cacheInverseRotation(rotation) {
-    _inv.cos = Math.cos(-rotation);
-    _inv.sin = Math.sin(-rotation);
-    return _inv;
+  // EXTRACTION: two-touch analysis, used 2×
+  function analyzeTwoTouches(t0, t1, rect) {
+    const p0 = localPoint(t0, rect);
+    const p1 = localPoint(t1, rect);
+    const dx = p1.x - p0.x, dy = p1.y - p0.y;
+    return {
+      dist: Math.sqrt(dx * dx + dy * dy) || 1,
+      angle: Math.atan2(dy, dx),
+      midX: (p0.x + p1.x) / 2,
+      midY: (p0.y + p1.y) / 2
+    };
   }
 
   function strokeColor(stroke) {
@@ -242,7 +250,7 @@
     isPenActive = true;
     if (toolbarEl) toolbarEl.style.pointerEvents = "none";
 
-    const p = localPoint(e, liveCanvas.getBoundingClientRect());
+    const p = localPoint(e, currentRect());
     strokeOriginCamera = { x: camera.x, y: camera.y, scale: camera.scale, rotation: camera.rotation };
     currentStroke = {
       id: Store.uuid(), points: [], color: toolbar.currentColor,
@@ -256,7 +264,7 @@
   function penMove(e) {
     if (!isPen(e) || !currentStroke || screenCount >= MAX_POINTS) return;
 
-    const p = localPoint(e, liveCanvas.getBoundingClientRect());
+    const p = localPoint(e, currentRect());
     const dx = p.x - screenX[screenCount - 1];
     const dy = p.y - screenY[screenCount - 1];
     if (dx * dx + dy * dy < 2.25) return;
@@ -271,15 +279,17 @@
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
     if (currentStroke && screenCount > 0) {
+      // INLINED (was cacheInverseRotation, only used here)
       const c = strokeOriginCamera;
-      const r = cacheInverseRotation(c.rotation);
+      const cos = Math.cos(-c.rotation);
+      const sin = Math.sin(-c.rotation);
 
       for (let i = 0; i < screenCount; i++) {
         const px = screenX[i] - halfW;
         const py = screenY[i] - halfH;
         currentStroke.points.push({
-          x: (px * r.cos - py * r.sin) / c.scale + c.x,
-          y: (px * r.sin + py * r.cos) / c.scale + c.y
+          x: (px * cos - py * sin) / c.scale + c.x,
+          y: (px * sin + py * cos) / c.scale + c.y
         });
       }
 
@@ -299,21 +309,17 @@
 
   function touchStart(e) {
     if (isPenActive) return;
-    const rect = liveCanvas.getBoundingClientRect();
+    const rect = currentRect();
 
     if (e.touches.length === 1) {
       touchCtx.gesture = beginPendingPan(e.touches[0], rect);
     } else if (e.touches.length === 2) {
-      const p0 = localPoint(e.touches[0], rect);
-      const p1 = localPoint(e.touches[1], rect);
-      const dx = p1.x - p0.x, dy = p1.y - p0.y;
+      const a = analyzeTwoTouches(e.touches[0], e.touches[1], rect);
       touchCtx.gesture = {
         type: "pinch",
-        startDist: Math.sqrt(dx * dx + dy * dy) || 1,
-        startAngle: Math.atan2(dy, dx),
-        startScale: camera.scale,
-        startRotation: camera.rotation,
-        startMid: { x: (p0.x + p1.x) / 2, y: (p0.y + p1.y) / 2 }
+        startDist: a.dist, startAngle: a.angle,
+        startScale: camera.scale, startRotation: camera.rotation,
+        startMid: { x: a.midX, y: a.midY }
       };
     }
   }
@@ -321,7 +327,7 @@
   function touchMove(e) {
     if (isPenActive || !touchCtx.gesture) return;
     e.preventDefault();
-    const rect = liveCanvas.getBoundingClientRect();
+    const rect = currentRect();
 
     if (touchCtx.gesture.type === "pending_pan" && e.touches.length === 1) {
       const p = localPoint(e.touches[0], rect);
@@ -338,37 +344,20 @@
         renderBackground();
       }
 
-      const r = cacheInverseRotation(camera.rotation);
-      camera.x -= (dx * r.cos - dy * r.sin) / camera.scale;
-      camera.y -= (dx * r.sin + dy * r.cos) / camera.scale;
-      camera.markPanDirty();
-
+      camera.pan(dx, dy);
       touchCtx.gesture.lastX = p.x;
       touchCtx.gesture.lastY = p.y;
     } else if (touchCtx.gesture.type === "pinch" && e.touches.length >= 2) {
       panBuffer.reset();
-      const p0 = localPoint(e.touches[0], rect);
-      const p1 = localPoint(e.touches[1], rect);
-      const dx = p1.x - p0.x, dy = p1.y - p0.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const midX = (p0.x + p1.x) / 2, midY = (p0.y + p1.y) / 2;
+      const a = analyzeTwoTouches(e.touches[0], e.touches[1], rect);
 
       const g = touchCtx.gesture;
-      const newScale = toolbar.zoomLocked ? g.startScale : CLAMP_SCALE(g.startScale * (dist / g.startDist));
+      const newScale = toolbar.zoomLocked ? g.startScale : CLAMP_SCALE(g.startScale * (a.dist / g.startDist));
       const newRot = (!toolbar.rotationLocked && Date.now() >= toolbar.rotationSnapHoldUntil)
-        ? g.startRotation + (Math.atan2(dy, dx) - g.startAngle)
+        ? g.startRotation + (a.angle - g.startAngle)
         : g.startRotation;
 
-      const worldMid = camera.toWorld(midX, midY, halfW, halfH);
-      camera.scale = newScale;
-      camera.rotation = newRot;
-      camera.markDirty();
-
-      const r = cacheInverseRotation(newRot);
-      const mdx = midX - halfW, mdy = midY - halfH;
-      camera.x = worldMid.x - (mdx * r.cos - mdy * r.sin) / newScale;
-      camera.y = worldMid.y - (mdx * r.sin + mdy * r.cos) / newScale;
-
+      camera.zoomAt(a.midX, a.midY, newScale, newRot, halfW, halfH);
       updateIndicators();
       renderBackground();
     }
@@ -389,12 +378,11 @@
       }
       touchCtx.gesture = null;
     } else if (e.touches.length === 1 && touchCtx.gesture.type === "pinch") {
-      touchCtx.gesture = beginPendingPan(e.touches[0], liveCanvas.getBoundingClientRect());
+      touchCtx.gesture = beginPendingPan(e.touches[0], currentRect());
     }
   }
 
   function init() {
-    // 2. DOM REFS — data table
     ([bgCanvas, liveCanvas, toolbarEl, zoomEl, rotEl, backBtn] =
       ["bg-surface", "draw-surface", "toolbar", "zoom-indicator", "rotation-indicator", "back-btn"].map($));
 
@@ -427,7 +415,6 @@
       }
     });
 
-    // 3. EVENT LISTENERS — data table
     [
       ["pointerdown", penDown],
       ["pointermove", penMove],
@@ -465,11 +452,13 @@
     }
 
     if (!isFinite(minX)) return;
-    camera.x = (minX + maxX) / 2;
-    camera.y = (minY + maxY) / 2;
-    camera.rotation = 0;
-    camera.scale = CLAMP_SCALE(Math.min(1000 / (maxX - minX + 400), 800 / (maxY - minY + 400)));
-    camera.markDirty();
+    camera.setPosition(
+      (minX + maxX) / 2,
+      (minY + maxY) / 2,
+      CLAMP_SCALE(Math.min(1000 / (maxX - minX + 400), 800 / (maxY - minY + 400))),
+      0
+    );
+
     if (panBuffer) panBuffer.reset();
     renderBackground();
     updateIndicators();
