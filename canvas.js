@@ -66,6 +66,11 @@
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
   }
 
+  // NEW: replaces 5× localPoint(e.touches[0], ...)
+  function firstTouch(e, rect) {
+    return localPoint(e.touches[0], rect);
+  }
+
   function getPenPoint(e) {
     return isPen(e) ? localPoint(e, currentRect()) : null;
   }
@@ -99,10 +104,12 @@
     return true;
   }
 
+  // CHANGED: DPR() once, not 4×
   function resizeLayer(canvas, context, w, h, factor) {
-    canvas.width = w * factor * DPR();
-    canvas.height = h * factor * DPR();
-    context.setTransform(DPR(), 0, 0, DPR(), 0, 0);
+    const dpr = DPR();
+    canvas.width = w * factor * dpr;
+    canvas.height = h * factor * dpr;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
   function strokeBounds(stroke) {
@@ -164,12 +171,18 @@
     }
   }
 
+  // NEW: replaces 2× "if 1 touch, transition back to pending_pan, else null"
+  function continueAsPendingPanIfOneTouch(e) {
+    if (e.touches.length !== 1) return null;
+    return Gesture.pending_pan.start(firstTouch(e, currentRect()));
+  }
+
   // --- GESTURE STATE MACHINE ---
   const Gesture = {
     pending_pan: {
       start(p) { return { type: "pending_pan", startX: p.x, startY: p.y }; },
       move(g, e, rect) {
-        const p = localPoint(e.touches[0], rect);
+        const p = firstTouch(e, rect);
         if ((p.x - g.startX) ** 2 + (p.y - g.startY) ** 2 > 225) return Gesture.pan.start(p);
         return g;
       },
@@ -178,14 +191,16 @@
     pan: {
       start(p) { return { type: "pan", lastX: p.x, lastY: p.y }; },
       move(g, e, rect) {
-        const p = localPoint(e.touches[0], rect);
-        flushPanBuffer(p.x - g.lastX, p.y - g.lastY);
-        camera.pan(p.x - g.lastX, p.y - g.lastY);
+        const p = firstTouch(e, rect);
+        // CHANGED: dx/dy computed once, passed twice
+        const dx = p.x - g.lastX;
+        const dy = p.y - g.lastY;
+        flushPanBuffer(dx, dy);
+        camera.pan(dx, dy);
         return Gesture.pan.start(p);
       },
       end(g, e) {
-        if (e.touches.length === 1) return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
-        return null;
+        return continueAsPendingPanIfOneTouch(e);
       }
     },
     pinch: {
@@ -217,8 +232,7 @@
           camera.markDirty();
           refreshUI();
         }
-        if (e.touches.length === 1) return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
-        return null;
+        return continueAsPendingPanIfOneTouch(e);
       }
     }
   };
@@ -395,8 +409,10 @@
   // --- TOUCH DISPATCH ---
   const touchCtx = { gesture: null };
 
+  // CHANGED: single guard. preventDefault moved here so touchMove has no guard.
   function dispatchGesture(phase, e) {
     if (isPenActive || !touchCtx.gesture) return;
+    if (phase === "move") e.preventDefault();
     const handler = Gesture[touchCtx.gesture.type];
     if (!handler || !handler[phase]) return;
     touchCtx.gesture = handler[phase](touchCtx.gesture, e, currentRect());
@@ -406,15 +422,13 @@
     if (isPenActive) return;
     const rect = currentRect();
     if (e.touches.length === 1) {
-      touchCtx.gesture = Gesture.pending_pan.start(localPoint(e.touches[0], rect));
+      touchCtx.gesture = Gesture.pending_pan.start(firstTouch(e, rect));
     } else if (e.touches.length === 2) {
       touchCtx.gesture = Gesture.pinch.start(e.touches[0], e.touches[1], rect);
     }
   }
 
   function touchMove(e) {
-    if (isPenActive || !touchCtx.gesture) return;
-    e.preventDefault();
     dispatchGesture("move", e);
   }
 
