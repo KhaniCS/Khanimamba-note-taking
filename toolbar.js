@@ -12,36 +12,45 @@
     }
 
     wire(onCenter, onToggleRotation, onToggleZoom) {
-      // 1. Collapse the 3 button groups into one helper
-      const wireGroup = (selector, applyValue) => {
-        document.querySelectorAll(selector).forEach((btn) => {
+      // 1. THE DATA TABLE
+      const buttonGroups = [
+        { selector: '.tool-btn[data-tool]', property: 'currentTool', attribute: 'data-tool' },
+        { selector: '.size-btn', property: 'currentSize', attribute: 'data-size', isNumber: true },
+        { selector: '.color-btn', property: 'currentColor', attribute: 'data-color' }
+      ];
+
+      // 2. ONE LOOP FOR ALL GROUPS
+      buttonGroups.forEach(group => {
+        document.querySelectorAll(group.selector).forEach(btn => {
           btn.addEventListener('click', () => {
-            document.querySelectorAll(selector).forEach(b => b.classList.remove('active'));
+            document.querySelectorAll(group.selector).forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            applyValue(btn);
+            
+            const val = btn.getAttribute(group.attribute);
+            this[group.property] = group.isNumber ? parseInt(val, 10) : val;
           });
         });
-      };
-
-      wireGroup('.tool-btn[data-tool]', btn => { this.currentTool = btn.getAttribute('data-tool'); });
-      wireGroup('.size-btn', btn => { this.currentSize = parseInt(btn.getAttribute('data-size'), 10); });
-      wireGroup('.color-btn', btn => { this.currentColor = btn.getAttribute('data-color'); });
+      });
 
       document.getElementById('lost-btn').addEventListener('click', onCenter);
 
-      // 2. Collapse the 2 lock toggles into one helper
-      const wireToggle = (id, activeKey, labelOn, labelOff, onToggle) => {
-        const btn = document.getElementById(id);
-        btn.addEventListener('click', () => {
-          this[activeKey] = !this[activeKey];
-          btn.textContent = this[activeKey] ? labelOn : labelOff;
-          btn.classList.toggle('active', this[activeKey]);
-          if (onToggle) onToggle();
-        });
-      };
+      // 3. THE TOGGLE DATA TABLE
+      const lockButtons = [
+        { id: 'rotate-lock-btn', property: 'rotationLocked', onLabel: 'ROT 🔒', offLabel: 'ROT 🔓', callback: onToggleRotation },
+        { id: 'zoom-lock-btn', property: 'zoomLocked', onLabel: 'ZOOM 🔒', offLabel: 'ZOOM 🔓', callback: onToggleZoom }
+      ];
 
-      wireToggle('rotate-lock-btn', 'rotationLocked', 'ROT 🔒', 'ROT 🔓', onToggleRotation);
-      wireToggle('zoom-lock-btn', 'zoomLocked', 'ZOOM 🔒', 'ZOOM 🔓', onToggleZoom);
+      // 4. ONE LOOP FOR ALL TOGGLES
+      lockButtons.forEach(config => {
+        const btn = document.getElementById(config.id);
+        if (!btn) return;
+        btn.addEventListener('click', () => {
+          this[config.property] = !this[config.property];
+          btn.textContent = this[config.property] ? config.onLabel : config.offLabel;
+          btn.classList.toggle('active', this[config.property]);
+          if (config.callback) config.callback();
+        });
+      });
     }
   }
 
