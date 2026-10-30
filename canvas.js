@@ -10,12 +10,16 @@
   const toolbar = new window.Toolbar();
   const autosaver = new window.AutoSaver(Store, 5000);
 
+  // --- CONSTANTS & EXTRACTED HELPERS ---
   const MIN_SCALE = 0.000000001;
   const MAX_SCALE = 1000000000;
   const CLAMP_SCALE = (v) => v < MIN_SCALE ? MIN_SCALE : v > MAX_SCALE ? MAX_SCALE : v;
   const isPen = (e) => e.pointerType === "pen" || e.pointerType === "mouse";
+  const hasPoints = (s) => s && s.points && s.points.length > 0;
   const $ = (id) => document.getElementById(id);
   const snap = (val, spacing) => Math.floor(val / spacing) * spacing;
+  const DPR = () => window.devicePixelRatio || 1;
+  const canvasSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
 
   let bgCanvas, bgCtx, liveCanvas, liveCtx, toolbarEl, zoomEl, rotEl, backBtn;
 
@@ -62,8 +66,7 @@
   }
 
   function getPenPoint(e) {
-    if (!isPen(e)) return null;
-    return localPoint(e, currentRect());
+    return isPen(e) ? localPoint(e, currentRect()) : null;
   }
 
   function beginPendingPan(touch, rect) {
@@ -100,14 +103,13 @@
   }
 
   function resizeLayer(canvas, context, w, h, factor) {
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = w * factor * dpr;
-    canvas.height = h * factor * dpr;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    canvas.width = w * factor * DPR();
+    canvas.height = h * factor * DPR();
+    context.setTransform(DPR(), 0, 0, DPR(), 0, 0);
   }
 
   function strokeBounds(stroke) {
-    if (!stroke || !stroke.points || stroke.points.length === 0) return null;
+    if (!hasPoints(stroke)) return null;
     const b = emptyBounds();
     for (const p of stroke.points) extendBounds(b, p.x, p.y);
     return b;
@@ -158,6 +160,13 @@
     autosaver.schedule(canvasData);
   }
 
+  // NEW: extracts the "query visible strokes" block
+  function getVisibleStrokes(w, h, cx, cy) {
+    if (!canvasData) return [];
+    const bounds = camera.getVisibleBounds(w, h, cx, cy);
+    return strokeTree ? strokeTree.retrieve(bounds) : canvasData.strokes;
+  }
+
   class QuadTree {
     constructor(bounds, maxObjects = 10, maxLevels = 4, level = 0) {
       this.bounds = bounds; this.maxObjects = maxObjects; this.maxLevels = maxLevels; this.level = level;
@@ -167,8 +176,9 @@
       const lvl = this.level + 1;
       const w = this.bounds.w / 2, h = this.bounds.h / 2;
       const x = this.bounds.x, y = this.bounds.y;
-      const offsets = [[w, 0], [0, 0], [0, h], [w, h]];
-      this.nodes = offsets.map(([dx, dy]) => new QuadTree({ x: x + dx, y: y + dy, w, h }, this.maxObjects, this.maxLevels, lvl));
+      this.nodes = [[w, 0], [0, 0], [0, h], [w, h]].map(([dx, dy]) =>
+        new QuadTree({ x: x + dx, y: y + dy, w, h }, this.maxObjects, this.maxLevels, lvl)
+      );
     }
     getIndex(box) {
       const midX = this.bounds.x + this.bounds.w / 2;
@@ -210,12 +220,9 @@
   function drawGrid(c, w, h, cx, cy) {
     const spacing = getGridSpacing();
     const bounds = camera.getVisibleBounds(w, h, cx, cy);
-    const startX = snap(bounds.minX, spacing);
-    const startY = snap(bounds.minY, spacing);
-
     c.fillStyle = "#d0d0d8";
-    for (let wx = startX; wx <= bounds.maxX; wx += spacing) {
-      for (let wy = startY; wy <= bounds.maxY; wy += spacing) {
+    for (let wx = snap(bounds.minX, spacing); wx <= bounds.maxX; wx += spacing) {
+      for (let wy = snap(bounds.minY, spacing); wy <= bounds.maxY; wy += spacing) {
         projectToScreen(wx, wy, _ptA);
         c.beginPath(); c.arc(_ptA.x, _ptA.y, 1.5, 0, Math.PI * 2); c.fill();
       }
@@ -223,7 +230,8 @@
   }
 
   function drawStrokeOn(c, stroke) {
-    if (!stroke.points || stroke.points.length === 0 || (stroke.width || 4) * camera.scale < 0.1) return;
+    if (!hasPoints(stroke)) return;
+    if ((stroke.width || 4) * camera.scale < 0.1) return;
 
     applyPenStyle(c, stroke);
     const pts = stroke.points;
@@ -250,19 +258,16 @@
   }
 
   function renderBackground() {
-    const w = bgCanvas.width / (window.devicePixelRatio || 1);
-    const h = bgCanvas.height / (window.devicePixelRatio || 1);
+    const w = bgCanvas.width / DPR();
+    const h = bgCanvas.height / DPR();
     const cx = w / 2, cy = h / 2;
 
     camera.updateMatrix(cx, cy);
     bgCtx.clearRect(0, 0, w, h);
     drawGrid(bgCtx, w, h, cx, cy);
 
-    if (canvasData) {
-      const view = camera.getVisibleBounds(w, h, cx, cy);
-      const visible = strokeTree ? strokeTree.retrieve(view) : canvasData.strokes;
-      for (const s of visible) drawStrokeOn(bgCtx, s);
-    }
+    // NEW: uses getVisibleStrokes helper
+    for (const s of getVisibleStrokes(w, h, cx, cy)) drawStrokeOn(bgCtx, s);
   }
 
   let renderScheduled = false;
@@ -271,7 +276,8 @@
     renderScheduled = true;
     requestAnimationFrame(() => {
       renderScheduled = false;
-      liveCtx.clearRect(0, 0, liveCanvas.clientWidth, liveCanvas.clientHeight);
+      const { w, h } = canvasSize();
+      liveCtx.clearRect(0, 0, w, h);
       if (!currentStroke || screenCount === 0) return;
 
       applyPenStyle(liveCtx, currentStroke);
@@ -350,13 +356,17 @@
     e.preventDefault();
     const rect = currentRect();
 
-    if (touchCtx.gesture.type === "pending_pan" && e.touches.length === 1) {
+    // NEW: hoisted localPoint for the two 1-touch branches
+    if (e.touches.length === 1 && (touchCtx.gesture.type === "pending_pan" || touchCtx.gesture.type === "pan")) {
       const p = localPoint(e.touches[0], rect);
-      if ((p.x - touchCtx.gesture.startX) ** 2 + (p.y - touchCtx.gesture.startY) ** 2 > 225) {
-        touchCtx.gesture = { type: "pan", lastX: p.x, lastY: p.y };
+
+      if (touchCtx.gesture.type === "pending_pan") {
+        if ((p.x - touchCtx.gesture.startX) ** 2 + (p.y - touchCtx.gesture.startY) ** 2 > 225) {
+          touchCtx.gesture = { type: "pan", lastX: p.x, lastY: p.y };
+        }
+        return;
       }
-    } else if (touchCtx.gesture.type === "pan" && e.touches.length === 1) {
-      const p = localPoint(e.touches[0], rect);
+
       const dx = p.x - touchCtx.gesture.lastX;
       const dy = p.y - touchCtx.gesture.lastY;
 
@@ -412,7 +422,7 @@
     liveCtx = liveCanvas.getContext("2d");
 
     function resize() {
-      const w = liveCanvas.clientWidth, h = liveCanvas.clientHeight;
+      const { w, h } = canvasSize();
       halfW = w / 2; halfH = h / 2;
       resizeLayer(liveCanvas, liveCtx, w, h, 1.0);
       resizeLayer(bgCanvas, bgCtx, w, h, 1.4);
@@ -450,7 +460,7 @@
       if (!canvasData.strokes) canvasData.strokes = [];
       const S = 1000000;
       strokeTree = new QuadTree({ x: -S/2, y: -S/2, w: S, h: S });
-      for (const s of canvasData.strokes) if (s.points.length > 0 && s.bounds) strokeTree.insert(s);
+      for (const s of canvasData.strokes) if (hasPoints(s) && s.bounds) strokeTree.insert(s);
       $("canvas-title").textContent = data.title || "Untitled";
       centerOnContent();
       refreshUI();
