@@ -8,7 +8,6 @@
       this.scale = 1;
       this.rotation = 0;
 
-      // Matrix cache
       this.a = 1;
       this.b = 0;
       this.tx = 0;
@@ -18,24 +17,48 @@
       this.panDirty = true;
       this.cx = 0;
       this.cy = 0;
+
+      this._inv = { cos: 1, sin: 0 };
     }
 
-    // Full rebuild — needed when rotation or scale changes
-    markDirty() {
-      this.dirty = true;
-      this.panDirty = true;
+    markDirty() { this.dirty = true; this.panDirty = true; }
+    markPanDirty() { this.panDirty = true; }
+
+    setPosition(x, y, scale, rotation) {
+      this.x = x; this.y = y; this.scale = scale; this.rotation = rotation;
+      this.markDirty();
     }
 
-    // Position-only rebuild — during panning. NO TRIG.
-    markPanDirty() {
-      this.panDirty = true;
+    pan(dx, dy) {
+      const r = this._invRot();
+      this.x -= (dx * r.cos - dy * r.sin) / this.scale;
+      this.y -= (dx * r.sin + dy * r.cos) / this.scale;
+      this.markPanDirty();
+    }
+
+    zoomAt(sx, sy, newScale, newRot, cx, cy) {
+      const worldMid = this.toWorld(sx, sy, cx, cy);
+      this.scale = newScale;
+      this.rotation = newRot;
+      this.markDirty();
+
+      const r = this._invRot();
+      const mdx = sx - cx, mdy = sy - cy;
+      this.x = worldMid.x - (mdx * r.cos - mdy * r.sin) / newScale;
+      this.y = worldMid.y - (mdx * r.sin + mdy * r.cos) / newScale;
+    }
+
+    // THE EXTRACTION: one place for the cos/sin(-rotation) pair
+    _invRot() {
+      this._inv.cos = Math.cos(-this.rotation);
+      this._inv.sin = Math.sin(-this.rotation);
+      return this._inv;
     }
 
     updateMatrix(cx, cy) {
       this.cx = cx;
       this.cy = cy;
 
-      // Only recalculate cos/sin if rotation/scale actually changed
       if (this.dirty) {
         const cos = Math.cos(this.rotation);
         const sin = Math.sin(this.rotation);
@@ -44,7 +67,6 @@
         this.dirty = false;
       }
 
-      // Always update translation when pan is dirty (no trig, just mult + add)
       if (this.panDirty) {
         this.tx = -this.x * this.a + this.y * this.b + this.cx;
         this.ty = -this.x * this.b - this.y * this.a + this.cy;
@@ -52,54 +74,32 @@
       }
     }
 
-    // Convert screen to world using the inverse matrix
     toWorld(sx, sy, cx, cy) {
-      const px = sx - cx;
-      const py = sy - cy;
-      const cos = Math.cos(-this.rotation);
-      const sin = Math.sin(-this.rotation);
+      const r = this._invRot();
+      const px = sx - cx, py = sy - cy;
       return {
-        x: (px * cos - py * sin) / this.scale + this.x,
-        y: (px * sin + py * cos) / this.scale + this.y
+        x: (px * r.cos - py * r.sin) / this.scale + this.x,
+        y: (px * r.sin + py * r.cos) / this.scale + this.y
       };
     }
 
-    // Get the visible bounds in world space
     getVisibleBounds(w, h, cx, cy) {
-      const invScale = 1 / this.scale;
-      const cos = Math.cos(-this.rotation);
-      const sin = Math.sin(-this.rotation);
+      const inv = 1 / this.scale;
+      const r = this._invRot();
 
-      const p1x = -cx, p1y = -cy;
-      const p2x = w - cx, p2y = -cy;
-      const p3x = -cx, p3y = h - cy;
-      const p4x = w - cx, p4y = h - cy;
+      const corners = [
+        { x: -cx, y: -cy }, { x: w - cx, y: -cy },
+        { x: -cx, y: h - cy }, { x: w - cx, y: h - cy }
+      ];
 
-      const minX = this.x + Math.min(
-        (p1x * cos - p1y * sin) * invScale,
-        (p2x * cos - p2y * sin) * invScale,
-        (p3x * cos - p3y * sin) * invScale,
-        (p4x * cos - p4y * sin) * invScale
-      );
-      const maxX = this.x + Math.max(
-        (p1x * cos - p1y * sin) * invScale,
-        (p2x * cos - p2y * sin) * invScale,
-        (p3x * cos - p3y * sin) * invScale,
-        (p4x * cos - p4y * sin) * invScale
-      );
-      const minY = this.y + Math.min(
-        (p1x * sin + p1y * cos) * invScale,
-        (p2x * sin + p2y * cos) * invScale,
-        (p3x * sin + p3y * cos) * invScale,
-        (p4x * sin + p4y * cos) * invScale
-      );
-      const maxY = this.y + Math.max(
-        (p1x * sin + p1y * cos) * invScale,
-        (p2x * sin + p2y * cos) * invScale,
-        (p3x * sin + p3y * cos) * invScale,
-        (p4x * sin + p4y * cos) * invScale
-      );
-
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (let i = 0; i < 4; i++) {
+        const c = corners[i];
+        const wx = this.x + (c.x * r.cos - c.y * r.sin) * inv;
+        const wy = this.y + (c.x * r.sin + c.y * r.cos) * inv;
+        minX = Math.min(minX, wx); maxX = Math.max(maxX, wx);
+        minY = Math.min(minY, wy); maxY = Math.max(maxY, wy);
+      }
       return { minX, maxX, minY, maxY };
     }
   }
