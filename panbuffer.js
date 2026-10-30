@@ -2,12 +2,15 @@
   "use strict";
 
   class PanBuffer {
-    constructor(camera, canvasEl) {
+    // marginRatio: how far the background canvas extends past each screen edge,
+    // as a fraction of the screen. canvas.js passes the same BG_OVERSCAN it uses to
+    // size the canvas, so the two numbers can never disagree.
+    constructor(camera, canvasEl, marginRatio = 0.2) {
       this.camera = camera;
       this.canvasEl = canvasEl;
       this.offsetX = 0;
       this.offsetY = 0;
-      this.marginRatio = 0.20; // 20% margin
+      this.marginRatio = marginRatio;
 
       // PERF: tell the browser this canvas will be moved around, so it keeps it on
       // its own GPU layer and slides it without repainting anything.
