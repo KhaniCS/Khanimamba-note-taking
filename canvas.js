@@ -36,13 +36,25 @@
   const _ptB = { x: 0, y: 0 };
   const _ptC = { x: 0, y: 0 };
 
+  // --- BOUNDS HELPERS (the last real repetition) ---
+  function emptyBounds() { return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }; }
+  function extendBounds(b, x, y) {
+    b.minX = Math.min(b.minX, x); b.maxX = Math.max(b.maxX, x);
+    b.minY = Math.min(b.minY, y); b.maxY = Math.max(b.maxY, y);
+  }
+  function mergeBounds(a, b) {
+    if (!b) return a;
+    a.minX = Math.min(a.minX, b.minX); a.maxX = Math.max(a.maxX, b.maxX);
+    a.minY = Math.min(a.minY, b.minY); a.maxY = Math.max(a.maxY, b.maxY);
+    return a;
+  }
+
   function projectToScreen(wx, wy, out) {
     const { a, b, tx, ty } = camera;
     out.x = wx * a - wy * b + tx;
     out.y = wx * b + wy * a + ty;
   }
 
-  // EXTRACTION: canvas rect, used 5×
   const currentRect = () => liveCanvas.getBoundingClientRect();
 
   function localPoint(touch, rect) {
@@ -53,7 +65,6 @@
     return { type: "pending_pan", startX: touch.clientX - rect.left, startY: touch.clientY - rect.top };
   }
 
-  // EXTRACTION: two-touch analysis, used 2×
   function analyzeTwoTouches(t0, t1, rect) {
     const p0 = localPoint(t0, rect);
     const p1 = localPoint(t1, rect);
@@ -66,12 +77,8 @@
     };
   }
 
-  function strokeColor(stroke) {
-    return stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
-  }
-
   function applyPenStyle(ctx, stroke) {
-    const color = strokeColor(stroke);
+    const color = stroke.isEraser ? "#fbfaf7" : (stroke.color || "#1a1a2e");
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     ctx.strokeStyle = color;
@@ -94,14 +101,12 @@
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  // SIMPLIFIED with extendBounds
   function strokeBounds(stroke) {
     if (!stroke || !stroke.points || stroke.points.length === 0) return null;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const p of stroke.points) {
-      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
-      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
-    }
-    return { minX, minY, maxX, maxY };
+    const b = emptyBounds();
+    for (const p of stroke.points) extendBounds(b, p.x, p.y);
+    return b;
   }
 
   function updateIndicators() {
@@ -279,7 +284,6 @@
     if (toolbarEl) toolbarEl.style.pointerEvents = "auto";
 
     if (currentStroke && screenCount > 0) {
-      // INLINED (was cacheInverseRotation, only used here)
       const c = strokeOriginCamera;
       const cos = Math.cos(-c.rotation);
       const sin = Math.sin(-c.rotation);
@@ -440,22 +444,18 @@
     }).catch((err) => window.showError("Database error: " + err, "red"));
   }
 
+  // SIMPLIFIED with mergeBounds
   function centerOnContent() {
     if (!canvasData || canvasData.strokes.length === 0) return;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
-    for (const s of canvasData.strokes) {
-      const b = strokeBounds(s);
-      if (!b) continue;
-      minX = Math.min(minX, b.minX); maxX = Math.max(maxX, b.maxX);
-      minY = Math.min(minY, b.minY); maxY = Math.max(maxY, b.maxY);
-    }
+    const agg = emptyBounds();
+    for (const s of canvasData.strokes) mergeBounds(agg, strokeBounds(s));
 
-    if (!isFinite(minX)) return;
+    if (!isFinite(agg.minX)) return;
     camera.setPosition(
-      (minX + maxX) / 2,
-      (minY + maxY) / 2,
-      CLAMP_SCALE(Math.min(1000 / (maxX - minX + 400), 800 / (maxY - minY + 400))),
+      (agg.minX + agg.maxX) / 2,
+      (agg.minY + agg.maxY) / 2,
+      CLAMP_SCALE(Math.min(1000 / (agg.maxX - agg.minX + 400), 800 / (agg.maxY - agg.minY + 400))),
       0
     );
 
