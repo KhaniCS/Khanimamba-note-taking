@@ -11,20 +11,14 @@
   <script>
     function showError(msg) {
       var d = document.createElement("div");
-      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:red;color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;box-shadow:0 4px 6px rgba(0,0,0,0.3);";
+      d.style.cssText = "position:fixed;top:0;left:0;right:0;background:red;color:white;padding:20px;font-size:16px;z-index:99999;font-family:sans-serif;word-wrap:break-word;";
       d.textContent = "CRASH: " + msg;
       document.body.appendChild(d);
     }
     window.showError = showError;
-    
     window.addEventListener('error', function(e) {
-      if (e.target && (e.target.tagName === 'SCRIPT' || e.target.tagName === 'LINK')) {
-        showError("Failed to load file: " + (e.target.src || e.target.href));
-      } else {
-        showError(e.message + " in " + (e.filename || "unknown file"));
-      }
+      showError(e.message + " in " + (e.filename || "unknown file"));
     }, true);
-
     window.addEventListener('unhandledrejection', function(e) {
       showError("Database/Async error: " + e.reason);
     });
@@ -40,17 +34,14 @@
   <div id="toolbar">
     <button id="lost-btn" class="tool-btn wide" type="button">LOST</button>
     <div class="divider"></div>
-    
     <div class="tool-group">
       <button class="tool-btn active" data-tool="pen" type="button">✎</button>
       <button class="tool-btn" data-tool="eraser" type="button">⌫</button>
     </div>
     <div class="divider"></div>
-
     <button id="rotate-lock-btn" class="tool-btn wide" type="button">ROT 🔓</button>
     <button id="zoom-lock-btn" class="tool-btn wide" type="button">ZOOM 🔓</button>
     <div class="divider"></div>
-
     <div class="size-group">
       <button class="size-btn" data-size="2" type="button">2</button>
       <button class="size-btn active" data-size="4" type="button">4</button>
@@ -58,7 +49,6 @@
       <button class="size-btn" data-size="20" type="button">20</button>
     </div>
     <div class="divider"></div>
-
     <div class="color-group">
       <button class="color-btn active" data-color="#1a1a2e" style="background:#1a1a2e;" type="button"></button>
       <button class="color-btn" data-color="#ff3b30" style="background:#ff3b30;" type="button"></button>
@@ -75,6 +65,7 @@
   </div>
 
   <div id="canvas-wrap">
+    <canvas id="bg-surface"></canvas>
     <canvas id="draw-surface"></canvas>
     
     <div id="saving-overlay">
@@ -86,6 +77,10 @@
   </div>
   
   <script src="store.js"></script>
+  <script src="camera.js"></script>
+  <script src="panbuffer.js"></script>
+  <script src="toolbar.js"></script>
+  <script src="autosaver.js"></script>
   <script src="canvas.js"></script>
 </body>
 </html>
