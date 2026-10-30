@@ -18,6 +18,7 @@
   const $ = (id) => document.getElementById(id);
   const snap = (val, spacing) => Math.floor(val / spacing) * spacing;
   const DPR = () => window.devicePixelRatio || 1;
+  const strokeScreenWidth = (stroke) => (stroke.width || 4) * camera.scale;
 
   let bgCanvas, bgCtx, liveCanvas, liveCtx, toolbarEl, zoomEl, rotEl, backBtn;
 
@@ -58,7 +59,8 @@
   }
 
   const currentRect = () => liveCanvas.getBoundingClientRect();
-  const canvasSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
+  const liveSize = () => ({ w: liveCanvas.clientWidth, h: liveCanvas.clientHeight });
+  const bgSize = () => ({ w: bgCanvas.width / DPR(), h: bgCanvas.height / DPR() });
 
   function localPoint(touch, rect) {
     return { x: touch.clientX - rect.left, y: touch.clientY - rect.top };
@@ -86,7 +88,7 @@
     ctx.lineJoin = "round";
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
-    ctx.lineWidth = (stroke.width || 4) * camera.scale;
+    ctx.lineWidth = strokeScreenWidth(stroke);
   }
 
   function pushPoint(x, y) {
@@ -155,22 +157,20 @@
     autosaver.schedule(canvasData);
   }
 
-  function getVisibleStrokes(w, h, cx, cy) {
-    if (!canvasData) return [];
-    const bounds = camera.getVisibleBounds(w, h, cx, cy);
-    return strokeTree ? strokeTree.retrieve(bounds) : canvasData.strokes;
+  function flushPanBuffer(dx, dy) {
+    if (panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight)) {
+      panBuffer.reset();
+      renderBackground();
+    }
   }
 
   // --- GESTURE STATE MACHINE ---
-  // Each gesture owns its own start/move/end. No more if/else chains.
   const Gesture = {
     pending_pan: {
       start(p) { return { type: "pending_pan", startX: p.x, startY: p.y }; },
       move(g, e, rect) {
         const p = localPoint(e.touches[0], rect);
-        if ((p.x - g.startX) ** 2 + (p.y - g.startY) ** 2 > 225) {
-          return Gesture.pan.start(p);
-        }
+        if ((p.x - g.startX) ** 2 + (p.y - g.startY) ** 2 > 225) return Gesture.pan.start(p);
         return g;
       },
       end() { return null; }
@@ -179,18 +179,12 @@
       start(p) { return { type: "pan", lastX: p.x, lastY: p.y }; },
       move(g, e, rect) {
         const p = localPoint(e.touches[0], rect);
-        const dx = p.x - g.lastX, dy = p.y - g.lastY;
-        if (panBuffer.addDelta(dx, dy, liveCanvas.clientWidth, liveCanvas.clientHeight)) {
-          panBuffer.reset();
-          renderBackground();
-        }
-        camera.pan(dx, dy);
+        flushPanBuffer(p.x - g.lastX, p.y - g.lastY);
+        camera.pan(p.x - g.lastX, p.y - g.lastY);
         return Gesture.pan.start(p);
       },
       end(g, e) {
-        if (e.touches.length === 1) {
-          return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
-        }
+        if (e.touches.length === 1) return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
         return null;
       }
     },
@@ -223,9 +217,7 @@
           camera.markDirty();
           refreshUI();
         }
-        if (e.touches.length === 1) {
-          return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
-        }
+        if (e.touches.length === 1) return Gesture.pending_pan.start(localPoint(e.touches[0], currentRect()));
         return null;
       }
     }
@@ -283,9 +275,8 @@
   let strokeTree = null;
 
   // --- RENDERING ---
-  function drawGrid(c, w, h, cx, cy) {
+  function drawGrid(c, bounds) {
     const spacing = getGridSpacing();
-    const bounds = camera.getVisibleBounds(w, h, cx, cy);
     c.fillStyle = "#d0d0d8";
     for (let wx = snap(bounds.minX, spacing); wx <= bounds.maxX; wx += spacing) {
       for (let wy = snap(bounds.minY, spacing); wy <= bounds.maxY; wy += spacing) {
@@ -297,7 +288,7 @@
 
   function drawStrokeOn(c, stroke) {
     if (!hasPoints(stroke)) return;
-    if ((stroke.width || 4) * camera.scale < 0.1) return;
+    if (strokeScreenWidth(stroke) < 0.1) return;
 
     applyPenStyle(c, stroke);
     const pts = stroke.points;
@@ -324,15 +315,18 @@
   }
 
   function renderBackground() {
-    const w = bgCanvas.width / DPR();
-    const h = bgCanvas.height / DPR();
+    const { w, h } = bgSize();
     const cx = w / 2, cy = h / 2;
-
     camera.updateMatrix(cx, cy);
-    bgCtx.clearRect(0, 0, w, h);
-    drawGrid(bgCtx, w, h, cx, cy);
+    const bounds = camera.getVisibleBounds(w, h, cx, cy);
 
-    for (const s of getVisibleStrokes(w, h, cx, cy)) drawStrokeOn(bgCtx, s);
+    bgCtx.clearRect(0, 0, w, h);
+    drawGrid(bgCtx, bounds);
+
+    if (canvasData) {
+      const visible = strokeTree ? strokeTree.retrieve(bounds) : canvasData.strokes;
+      for (const s of visible) drawStrokeOn(bgCtx, s);
+    }
   }
 
   let renderScheduled = false;
@@ -341,7 +335,7 @@
     renderScheduled = true;
     requestAnimationFrame(() => {
       renderScheduled = false;
-      const { w, h } = canvasSize();
+      const { w, h } = liveSize();
       liveCtx.clearRect(0, 0, w, h);
       if (!currentStroke || screenCount === 0) return;
 
@@ -398,8 +392,15 @@
     }
   }
 
-  // --- TOUCH HANDLERS (DISPATCH ONLY) ---
+  // --- TOUCH DISPATCH ---
   const touchCtx = { gesture: null };
+
+  function dispatchGesture(phase, e) {
+    if (isPenActive || !touchCtx.gesture) return;
+    const handler = Gesture[touchCtx.gesture.type];
+    if (!handler || !handler[phase]) return;
+    touchCtx.gesture = handler[phase](touchCtx.gesture, e, currentRect());
+  }
 
   function touchStart(e) {
     if (isPenActive) return;
@@ -414,18 +415,11 @@
   function touchMove(e) {
     if (isPenActive || !touchCtx.gesture) return;
     e.preventDefault();
-    const handler = Gesture[touchCtx.gesture.type];
-    if (handler && handler.move) {
-      touchCtx.gesture = handler.move(touchCtx.gesture, e, currentRect()) || touchCtx.gesture;
-    }
+    dispatchGesture("move", e);
   }
 
   function touchEnd(e) {
-    if (isPenActive || !touchCtx.gesture) return;
-    const handler = Gesture[touchCtx.gesture.type];
-    if (handler && handler.end) {
-      touchCtx.gesture = handler.end(touchCtx.gesture, e);
-    }
+    dispatchGesture("end", e);
   }
 
   // --- INIT ---
@@ -441,7 +435,7 @@
     liveCtx = liveCanvas.getContext("2d");
 
     function resize() {
-      const { w, h } = canvasSize();
+      const { w, h } = liveSize();
       halfW = w / 2; halfH = h / 2;
       resizeLayer(liveCanvas, liveCtx, w, h, 1.0);
       resizeLayer(bgCanvas, bgCtx, w, h, 1.4);
